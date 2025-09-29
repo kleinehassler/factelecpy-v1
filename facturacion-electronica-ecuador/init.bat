@@ -8,11 +8,15 @@ REM Crear directorios necesarios
 echo Creando directorios...
 mkdir logs certificados uploads temp output backup rides 2>nul
 
-REM Verificar si existe el entorno virtual
-if not exist "venv" (
-    echo Creando entorno virtual...
-    python -m venv venv
+REM Verificar si existe el entorno virtual y eliminarlo para recrearlo
+if exist "venv" (
+    echo Eliminando entorno virtual existente...
+    rmdir /s /q venv
 )
+
+REM Crear entorno virtual con Python 3.10
+echo Creando entorno virtual con Python 3.10...
+py -3.10 -m venv venv
 
 REM Activar entorno virtual
 echo Activando entorno virtual...
@@ -20,7 +24,7 @@ call venv\Scripts\activate
 
 REM Actualizar pip
 echo Actualizando pip...
-pip install --upgrade pip
+python -m pip install --upgrade pip
 
 REM Instalar dependencias
 echo Instalando dependencias...
