@@ -1,0 +1,42 @@
+[global]
+developmentMode = false
+
+[server]
+port = 8501
+address = "localhost"
+baseUrlPath = ""
+enableCORS = true
+enableXsrfProtection = false
+maxUploadSize = 200
+maxMessageSize = 200
+enableWebsocketCompression = false
+
+[browser]
+serverAddress = "localhost"
+gatherUsageStats = false
+serverPort = 8501
+
+[mapbox]
+token = ""
+
+[deprecation]
+showfileUploaderEncoding = false
+showImageFormat = false
+
+[theme]
+base = "light"
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
+
+[runner]
+magicEnabled = true
+postScriptGC = true
+fastReruns = true
+enforceSerializableSessionState = true
+
+[logger]
+level = "info"
+messageFormat = "%(asctime)s %(message)s"

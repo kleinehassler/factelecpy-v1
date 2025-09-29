@@ -1,0 +1,47 @@
+{
+  "name": "facturacion-electronica-sri",
+  "version": "1.0.0",
+  "description": "Sistema de facturación electrónica para Ecuador según normativa del SRI",
+  "main": "backend/main.py",
+  "scripts": {
+    "start": "python backend/main.py",
+    "init": "bash init.sh",
+    "init-win": "init.bat",
+    "test": "python -m pytest tests/",
+    "dev": "uvicorn backend.main:app --reload",
+    "db-init": "python backend/database.py",
+    "frontend": "bash run_frontend.sh",
+    "frontend-win": "run_frontend.bat",
+    "dev-full": "concurrently \"uvicorn backend.main:app --reload\" \"streamlit run frontend/app.py\"",
+    "build": "python -m build",
+    "lint": "flake8 backend/ frontend/ utils/",
+    "format": "black backend/ frontend/ utils/"
+  },
+  "keywords": [
+    "facturacion-electronica",
+    "sri",
+    "ecuador",
+    "xades",
+    "xml",
+    "pdf",
+    "streamlit",
+    "fastapi"
+  ],
+  "author": "Desarrollador de Sistemas",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "bugs": {
+    "url": ""
+  },
+  "homepage": "",
+  "engines": {
+    "python": ">=3.8"
+  }
+}
