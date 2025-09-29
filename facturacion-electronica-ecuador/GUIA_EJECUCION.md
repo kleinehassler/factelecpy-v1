@@ -53,7 +53,24 @@ Esta guía está diseñada para usuarios sin conocimientos técnicos avanzados. 
 6. Durante la instalación, configura una contraseña para el usuario root
 
 ### 📁 Paso 3: Preparar el Sistema de Facturación
-3. Ejecuta el instalador
+3. Ejecuta el instalador del sistema de facturación y sigue el asistente.
+4. Abre PowerShell o CMD y navega a la carpeta del proyecto (por ejemplo C:\facturacion-electronica).
+5. Crea y activa el entorno virtual:
+   - python -m venv env
+   - .\env\Scripts\activate
+6. Instala las dependencias:
+   - pip install -r requirements.txt
+7. Configura la base de datos (ajusta según tu configuración MySQL):
+   - Edita el archivo .env o config/settings.py con las credenciales de MySQL.
+   - Ejecuta las migraciones:
+     - python manage.py migrate
+8. Inicia el backend usando los scripts incluidos:
+   - .\scripts\start-backend.bat — inicia el backend en modo producción utilizando las variables definidas en .env.
+   - .\scripts\start-backend-dev.bat — inicia el backend en modo desarrollo (auto-reload y logs).
+   - Si prefieres no usar los scripts, puedes iniciar manualmente:
+     - Para una aplicación Flask: set FLASK_ENV=production && python -m app.main
+     - Para una aplicación Django: set DJANGO_SETTINGS_MODULE=project.settings && python manage.py runserver 0.0.0.0:8000
+9. Verifica que el backend esté corriendo accediendo a http://localhost:8000 (ajusta el puerto si es necesario).
 4. Selecciona "Developer Default"
 5. Sigue las instrucciones del instalador
 6. Durante la instalación, configura una contraseña para el usuario root
