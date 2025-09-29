@@ -2,10 +2,12 @@
 API REST para facturación electrónica del SRI Ecuador
 Versión mejorada con validaciones y cálculos precisos
 """
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, validator, EmailStr
 from typing import List, Optional
 from datetime import datetime, date
 import os
@@ -13,6 +15,9 @@ import uuid
 from decimal import Decimal
 import logging
 import random
+import time
+from collections import defaultdict
+import asyncio
 
 from config.settings import settings
 from backend.database import DatabaseManager, FacturaRepository, ClienteRepository, ProductoRepository
@@ -23,14 +28,65 @@ from utils.ride_generator import RideGenerator
 from utils.email_sender import EmailSender, EmailTemplates
 
 
-# Modelos Pydantic para la API
+# Rate Limiting simple
+class RateLimiter:
+    def __init__(self):
+        self.requests = defaultdict(list)
+
+    def is_allowed(self, client_ip: str, max_requests: int = 100, window: int = 3600) -> bool:
+        now = time.time()
+        # Limpiar requests antiguos
+        self.requests[client_ip] = [req_time for req_time in self.requests[client_ip]
+                                   if now - req_time < window]
+
+        if len(self.requests[client_ip]) >= max_requests:
+            return False
+
+        self.requests[client_ip].append(now)
+        return True
+
+rate_limiter = RateLimiter()
+
+
+# Modelos Pydantic para la API con validaciones mejoradas
 class ClienteCreate(BaseModel):
     tipo_identificacion: str
     identificacion: str
     razon_social: str
     direccion: Optional[str] = None
     telefono: Optional[str] = None
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+    @validator('tipo_identificacion')
+    def validate_tipo_identificacion(cls, v):
+        valid_types = ['04', '05', '06', '07', '08']
+        if v not in valid_types:
+            raise ValueError(f'Tipo de identificación debe ser uno de: {valid_types}')
+        return v
+
+    @validator('identificacion')
+    def validate_identificacion(cls, v, values):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Identificación es requerida')
+
+        # Validar según tipo de identificación
+        tipo = values.get('tipo_identificacion')
+        if tipo == '04':  # RUC
+            if len(v) != 13 or not v.isdigit():
+                raise ValueError('RUC debe tener 13 dígitos')
+        elif tipo == '05':  # Cédula
+            if len(v) != 10 or not v.isdigit():
+                raise ValueError('Cédula debe tener 10 dígitos')
+
+        return v.strip()
+
+    @validator('razon_social')
+    def validate_razon_social(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Razón social es requerida')
+        if len(v.strip()) > 300:
+            raise ValueError('Razón social no puede exceder 300 caracteres')
+        return v.strip()
 
 
 class ClienteResponse(ClienteCreate):
@@ -48,71 +104,93 @@ class ProductoCreate(BaseModel):
     codigo_impuesto: str = "2"
     porcentaje_iva: Decimal = Decimal("0.12")
 
+    @validator('codigo_principal')
+    def validate_codigo_principal(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Código principal es requerido')
+        if len(v.strip()) > 25:
+            raise ValueError('Código principal no puede exceder 25 caracteres')
+        return v.strip()
 
-class ProductoResponse(ProductoCreate):
-    id: int
-    activo: bool
-    created_at: datetime
-    updated_at: datetime
+    @validator('descripcion')
+    def validate_descripcion(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Descripción es requerida')
+        if len(v.strip()) > 300:
+            raise ValueError('Descripción no puede exceder 300 caracteres')
+        return v.strip()
 
+    @validator('precio_unitario')
+    def validate_precio_unitario(cls, v):
+        if v <= 0:
+            raise ValueError('Precio unitario debe ser mayor a 0')
+        return v
 
-class DetalleFacturaCreate(BaseModel):
-    codigo_principal: str
-    codigo_auxiliar: Optional[str] = None
-    descripcion: Optional[str] = None
-    cantidad: Decimal
-    precio_unitario: Decimal
-    descuento: Decimal = Decimal("0.00")
-
-
-class FacturaCreate(BaseModel):
-    cliente_id: int
-    detalles: List[DetalleFacturaCreate]
-    observaciones: Optional[str] = None
-
-
-class FacturaResponse(BaseModel):
-    id: int
-    numero_comprobante: str
-    fecha_emision: datetime
-    clave_acceso: str
-    subtotal_sin_impuestos: Decimal
-    iva_12: Decimal
-    valor_total: Decimal
-    estado_sri: str
-    created_at: datetime
-
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
+    @validator('tipo')
+    def validate_tipo(cls, v):
+        if v not in ['BIEN', 'SERVICIO']:
+            raise ValueError('Tipo debe ser BIEN o SERVICIO')
+        return v
 
 # Inicializar aplicación FastAPI
 app = FastAPI(
     title="API Facturación Electrónica SRI Ecuador",
     description="API para generación de facturas electrónicas según normativa del SRI",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None
 )
 
-# Configurar CORS
+# Middleware de seguridad
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["localhost", "127.0.0.1", "*.localhost"]
+)
+
+# Configurar CORS de manera más segura
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],  # Solo frontend específico
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+# Middleware de Rate Limiting
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client_ip = request.client.host
+
+    # Excluir endpoints de documentación del rate limiting
+    if request.url.path in ["/docs", "/redoc", "/openapi.json"]:
+        response = await call_next(request)
+        return response
+
+    if not rate_limiter.is_allowed(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."}
+        )
+
+    response = await call_next(request)
+    return response
 
 # Configurar autenticación OAuth2
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Inicializar componentes
 db_manager = DatabaseManager()
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/api.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 def generar_numero_comprobante():
@@ -123,6 +201,36 @@ def generar_numero_comprobante():
     return f"001-001-{numero}"
 
 
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/api.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+# Middleware de logging de requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+
+    response = await call_next(request)
+
+    process_time = time.time() - start_time
+    logger.info(
+        f"{request.method} {request.url.path} - "
+        f"Status: {response.status_code} - "
+        f"Time: {process_time:.4f}s - "
+        f"Client: {request.client.host}"
+    )
+
+    return response
+
+
 # Rutas de la API
 @app.get("/")
 async def root():
@@ -130,8 +238,82 @@ async def root():
     return {
         "message": "API de Facturación Electrónica SRI Ecuador",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@app.get("/health")
+async def health_check():
+    """Endpoint de health check"""
+    try:
+        # Verificar conexión a base de datos
+        with db_manager.get_db_session() as db:
+            db.execute("SELECT 1")
+
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": "connected"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "timestamp": datetime.utcnow().isoformat(),
+                "error": "Database connection failed"
+            }
+        )
+
+
+@app.post("/clientes/", response_model=ClienteResponse)
+async def crear_cliente(cliente: ClienteCreate, request: Request):
+    """Crear un nuevo cliente"""
+    try:
+        logger.info(f"Creando cliente: {cliente.identificacion} desde IP: {request.client.host}")
+
+        with db_manager.get_db_session() as db:
+            cliente_repo = ClienteRepository(db)
+
+            # Verificar si el cliente ya existe
+            cliente_existente = cliente_repo.obtener_cliente_por_identificacion(
+                cliente.tipo_identificacion, cliente.identificacion
+            )
+
+            if cliente_existente:
+                logger.warning(f"Intento de crear cliente duplicado: {cliente.identificacion}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cliente con esta identificación ya existe"
+                )
+
+            # Crear cliente
+            cliente_db = cliente_repo.crear_cliente(cliente.dict())
+
+            logger.info(f"Cliente creado exitosamente: ID {cliente_db.id}")
+
+            return ClienteResponse(
+                id=cliente_db.id,
+                tipo_identificacion=cliente_db.tipo_identificacion,
+                identificacion=cliente_db.identificacion,
+                razon_social=cliente_db.razon_social,
+                direccion=cliente_db.direccion,
+                telefono=cliente_db.telefono,
+                email=cliente_db.email,
+                activo=cliente_db.activo,
+                created_at=cliente_db.created_at
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al crear cliente: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno del servidor. Por favor, intente más tarde."
+        )
 
 
 @app.post("/clientes/", response_model=ClienteResponse)
@@ -655,9 +837,158 @@ if __name__ == "__main__":
         print(f"✓ Directorio {dir_path} listo")
 
     # Iniciar servidor
+# Importar nuevas utilidades al inicio del archivo
+from utils.metrics import get_app_metrics, get_metrics_collector
+from utils.cache import get_cache_stats
+from utils.validators import validate_and_raise, BusinessValidator
+from config.logging_config import setup_logging, get_logger
+from datetime import datetime
+import time
+
+# Configurar logging mejorado
+setup_logging()
+logger = get_logger(__name__)
+
+# Obtener instancias de métricas
+app_metrics = get_app_metrics()
+
+# Endpoints de monitoreo y métricas
+@app.get("/metrics")
+async def get_metrics():
+    """Endpoint para obtener métricas de la aplicación"""
+    try:
+        metrics_data = get_metrics_collector().get_summary()
+        cache_stats = get_cache_stats()
+        db_info = db_manager.get_connection_info()
+
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "metrics": metrics_data,
+            "cache": cache_stats,
+            "database": db_info
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener métricas: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al obtener métricas")
+
+
+@app.get("/metrics/export")
+async def export_metrics():
+    """Exportar métricas a archivo"""
+    try:
+        import os
+        from datetime import datetime
+
+        # Crear directorio si no existe
+        os.makedirs("metrics", exist_ok=True)
+
+        # Generar nombre de archivo con timestamp
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filepath = f"metrics/metrics_{timestamp}.json"
+
+        # Exportar métricas
+        get_metrics_collector().export_to_file(filepath)
+
+        return {
+            "message": "Métricas exportadas exitosamente",
+            "filepath": filepath,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error al exportar métricas: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al exportar métricas")
+
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Limpiar todos los caches"""
+    try:
+        from utils.cache import cache_manager
+
+        cache_manager.clear_all()
+
+        return {
+            "message": "Todos los caches han sido limpiados",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error al limpiar cache: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al limpiar cache")
+
+
+@app.get("/system/info")
+async def get_system_info():
+    """Obtener información del sistema"""
+    try:
+        import psutil
+        import platform
+
+        # Información del sistema
+        system_info = {
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "cpu_count": psutil.cpu_count(),
+            "cpu_percent": psutil.cpu_percent(interval=1),
+            "memory": {
+                "total": psutil.virtual_memory().total,
+                "available": psutil.virtual_memory().available,
+                "percent": psutil.virtual_memory().percent
+            },
+            "disk": {
+                "total": psutil.disk_usage('/').total,
+                "free": psutil.disk_usage('/').free,
+                "percent": psutil.disk_usage('/').percent
+            }
+        }
+
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "system": system_info,
+            "application": {
+                "name": settings.APP_NAME,
+                "version": settings.APP_VERSION,
+                "debug": settings.DEBUG
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener información del sistema: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al obtener información del sistema")
+
+
+# Middleware mejorado para métricas
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Middleware para recopilar métricas de requests"""
+    start_time = time.time()
+
+    response = await call_next(request)
+
+    duration = time.time() - start_time
+
+    # Registrar métricas
+    try:
+        app_metrics.record_request(
+            method=request.method,
+            endpoint=request.url.path,
+            status_code=response.status_code,
+            duration=duration
+        )
+    except Exception as e:
+        logger.debug(f"No se pudo registrar métrica de request: {e}")
+
+    return response
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    logger.info(f"Iniciando {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Modo debug: {settings.DEBUG}")
+
     uvicorn.run(
         "main:app",
         host=settings.HOST,
         port=settings.PORT,
-        reload=settings.DEBUG
+        reload=settings.DEBUG,
+        log_level="info" if not settings.DEBUG else "debug"
     )

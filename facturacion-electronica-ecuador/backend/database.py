@@ -1,53 +1,99 @@
 """
 Sistema de base de datos para facturación electrónica del SRI Ecuador
 """
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, pool
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from contextlib import contextmanager
 import logging
 from typing import Optional, List
 import os
+import time
 
 from config.settings import settings
 from backend.models import Base, Empresa, Establecimiento, PuntoEmision, Cliente, Producto, Secuencia, Factura, Proforma, Usuario
 
+# Configurar logging
+logger = logging.getLogger(__name__)
+
 
 class DatabaseManager:
-    """Gestor de base de datos para el sistema de facturación electrónica"""
-    
+    """Gestor de base de datos mejorado para el sistema de facturación electrónica"""
+
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
         self._setup_database()
-    
+
     def _setup_database(self):
-        """Configurar conexión a la base de datos"""
+        """Configurar conexión a la base de datos con connection pooling"""
         try:
-            # Crear motor de base de datos
+            # Crear motor de base de datos con connection pooling mejorado
             self.engine = create_engine(
                 settings.DATABASE_URL,
+                pool_size=getattr(settings, "DB_POOL_SIZE", 5),
+                max_overflow=getattr(settings, "DB_MAX_OVERFLOW", 10),
                 pool_pre_ping=True,
                 pool_recycle=3600,
-                echo=settings.DEBUG
+                pool_timeout=30,
+                echo=settings.DEBUG,
+                connect_args={
+                    "charset": "utf8mb4",
+                    "use_unicode": True,
+                    "autocommit": False
+                }
             )
-            
+
             # Crear sesión
             self.SessionLocal = sessionmaker(
                 autocommit=False,
                 autoflush=False,
-                bind=self.engine
+                bind=self.engine,
+                expire_on_commit=False
             )
-            
+
+            # Verificar conexión
+            self._test_connection()
+
             # Crear tablas si no existen
             Base.metadata.create_all(bind=self.engine)
-            
+
+            logger.info("Base de datos configurada correctamente")
+
         except Exception as e:
+            logger.error(f"Error al configurar base de datos: {str(e)}")
             raise Exception(f"Error al configurar base de datos: {str(e)}")
-    
+
+    def _test_connection(self):
+        """Probar conexión a la base de datos"""
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("Conexión a base de datos exitosa")
+        except Exception as e:
+            logger.error(f"Error al conectar con la base de datos: {str(e)}")
+            raise
+
+    def get_connection_info(self) -> dict:
+        """Obtener información de conexión para monitoreo"""
+        try:
+            pool_obj = self.engine.pool
+            # Algunos pool implementations pueden no exponer todos estos métodos;
+            # hacemos acceso seguro con getattr
+            info = {
+                "pool_size": getattr(pool_obj, "size", lambda: None)(),
+                "checked_in": getattr(pool_obj, "checkedin", lambda: None)(),
+                "checked_out": getattr(pool_obj, "checkedout", lambda: None)(),
+                "overflow": getattr(pool_obj, "overflow", lambda: None)(),
+            }
+            return info
+        except Exception as e:
+            logger.error(f"Error al obtener información de conexión: {str(e)}")
+            return {}
+
     @contextmanager
     def get_db_session(self):
-        """Obtener sesión de base de datos con contexto"""
+        """Obtener sesión de base de datos con contexto mejorado"""
         db = self.SessionLocal()
         try:
             yield db
