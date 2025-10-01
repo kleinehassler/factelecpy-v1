@@ -2,14 +2,14 @@
 API REST para facturación electrónica del SRI Ecuador
 Versión mejorada con validaciones y cálculos precisos
 """
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator, EmailStr
 from typing import List, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import os
 import uuid
 from decimal import Decimal
@@ -18,6 +18,9 @@ import random
 import time
 from collections import defaultdict
 import asyncio
+import jwt
+from passlib.context import CryptContext
+from passlib.hash import bcrypt
 
 from config.settings import settings
 from backend.database import DatabaseManager, FacturaRepository, ClienteRepository, ProductoRepository
@@ -26,6 +29,10 @@ from utils.xml_generator import XMLGenerator, ClaveAccesoGenerator
 from utils.firma_digital import XadesBesSigner
 from utils.ride_generator import RideGenerator
 from utils.email_sender import EmailSender, EmailTemplates
+from utils.metrics import get_app_metrics, get_metrics_collector
+from utils.cache import get_cache_stats
+from utils.validators import validate_and_raise, BusinessValidator
+from config.logging_config import setup_logging, get_logger
 
 
 # Rate Limiting simple
@@ -46,6 +53,101 @@ class RateLimiter:
         return True
 
 rate_limiter = RateLimiter()
+
+# Configuración de autenticación
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Usuarios de prueba (en producción esto debería estar en base de datos)
+USERS_DB = {
+    "admin": {
+        "username": "admin",
+        "email": "admin@empresa.com",
+        "full_name": "Administrador",
+        "hashed_password": pwd_context.hash("admin123"),  # Contraseña: admin123
+    },
+    "usuario": {
+        "username": "usuario",
+        "email": "usuario@empresa.com",
+        "full_name": "Usuario",
+        "hashed_password": pwd_context.hash("usuario123"),  # Contraseña: usuario123
+    }
+}
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verificar contraseña"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def authenticate_user(username: str, password: str) -> Optional[dict]:
+    """Autenticar usuario"""
+    user = USERS_DB.get(username)
+    if not user:
+        return None
+    if not verify_password(password, user["hashed_password"]):
+        return None
+    return user
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Crear token JWT"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    to_encode.update({"exp": expire, "sub": data.get("username")})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str) -> Optional[dict]:
+    """Verificar token JWT"""
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        return {"username": username}
+    except jwt.PyJWTError:
+        return None
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+    """Obtener usuario actual desde token"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    token_data = verify_token(token)
+    if token_data is None:
+        raise credentials_exception
+
+    user = USERS_DB.get(token_data["username"])
+    if user is None:
+        raise credentials_exception
+
+    return user
+
+
+# Configurar logging
+import os
+import logging
+
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/api.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 # Modelos Pydantic para la API con validaciones mejoradas
@@ -203,12 +305,25 @@ class FacturaResponse(BaseModel):
     fecha_emision: datetime
     clave_acceso: str
     subtotal_sin_impuestos: Decimal
-    iva_12: Decimal
+    subtotal_0: Decimal = Decimal("0.00")
+    subtotal_12: Decimal = Decimal("0.00")
+    iva_12: Decimal = Decimal("0.00")
     valor_total: Decimal
-    estado_sri: str
-    numero_autorizacion: Optional[str] = None
-    fecha_autorizacion: Optional[datetime] = None
+    estado_sri: str = "PENDIENTE"
     created_at: datetime
+
+
+# Modelos para autenticación
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_data: Optional[dict] = None
+
+
+class UserData(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
 
 
 class ProductoResponse(ProductoCreate):
@@ -259,21 +374,12 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Configurar autenticación OAuth2
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# Configurar autenticación OAuth2 (ya está definido arriba, eliminando duplicado)
 
 # Inicializar componentes
 db_manager = DatabaseManager()
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/api.log'),
-        logging.StreamHandler()
-    ]
-)
+# Configurar logging (ya está configurado arriba, eliminando duplicado)
 logger = logging.getLogger(__name__)
 
 
@@ -283,18 +389,6 @@ def generar_numero_comprobante():
     # basado en la secuencia del punto de emisión
     numero = str(random.randint(1, 999999999)).zfill(9)
     return f"001-001-{numero}"
-
-
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/api.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 
 # Middleware de logging de requests
@@ -352,8 +446,60 @@ async def health_check():
         )
 
 
+# ============================================================================
+# ENDPOINTS DE AUTENTICACIÓN
+# ============================================================================
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(username: str = Form(...), password: str = Form(...)):
+    """Endpoint de login que recibe username y password como form data"""
+    try:
+        # Autenticar usuario
+        user = authenticate_user(username, password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Crear token de acceso
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user["username"]},
+            expires_delta=access_token_expires
+        )
+
+        # Preparar datos del usuario (sin contraseña)
+        user_data = {
+            "username": user["username"],
+            "email": user.get("email"),
+            "full_name": user.get("full_name")
+        }
+
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user_data=user_data
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error en login: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno del servidor"
+        )
+
+
+# ============================================================================
+# ENDPOINTS DE CLIENTES
+# ============================================================================
+
+
 @app.post("/clientes/", response_model=ClienteResponse)
-async def crear_cliente(cliente: ClienteCreate, request: Request):
+async def crear_cliente(cliente: ClienteCreate, request: Request, current_user: dict = Depends(get_current_user)):
     """Crear un nuevo cliente"""
     try:
         logger.info(f"Creando cliente: {cliente.identificacion} desde IP: {request.client.host}")
@@ -400,48 +546,11 @@ async def crear_cliente(cliente: ClienteCreate, request: Request):
         )
 
 
-@app.post("/clientes/", response_model=ClienteResponse)
-async def crear_cliente(cliente: ClienteCreate):
-    """Crear un nuevo cliente"""
-    try:
-        with db_manager.get_db_session() as db:
-            cliente_repo = ClienteRepository(db)
-
-            # Verificar si el cliente ya existe
-            cliente_existente = cliente_repo.obtener_cliente_por_identificacion(
-                cliente.tipo_identificacion, cliente.identificacion
-            )
-
-            if cliente_existente:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cliente con esta identificación ya existe"
-                )
-
-            # Crear cliente
-            cliente_db = cliente_repo.crear_cliente(cliente.dict())
-
-            return ClienteResponse(
-                id=cliente_db.id,
-                tipo_identificacion=cliente_db.tipo_identificacion,
-                identificacion=cliente_db.identificacion,
-                razon_social=cliente_db.razon_social,
-                direccion=cliente_db.direccion,
-                telefono=cliente_db.telefono,
-                email=cliente_db.email,
-                activo=cliente_db.activo,
-                created_at=cliente_db.created_at
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Error al crear cliente: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+# Endpoint POST /clientes/ removed (duplicate)
 
 
 @app.get("/clientes/{cliente_id}", response_model=ClienteResponse)
-async def obtener_cliente(cliente_id: int):
+async def obtener_cliente(cliente_id: int, current_user: dict = Depends(get_current_user)):
     """Obtener cliente por ID"""
     try:
         with db_manager.get_db_session() as db:
@@ -471,7 +580,7 @@ async def obtener_cliente(cliente_id: int):
 
 
 @app.post("/productos/", response_model=ProductoResponse)
-async def crear_producto(producto: ProductoCreate):
+async def crear_producto(producto: ProductoCreate, current_user: dict = Depends(get_current_user)):
     """Crear un nuevo producto"""
     try:
         with db_manager.get_db_session() as db:
@@ -512,8 +621,70 @@ async def crear_producto(producto: ProductoCreate):
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 
+@app.get("/productos/", response_model=List[ProductoResponse])
+async def listar_productos(skip: int = 0, limit: int = 100, current_user: dict = Depends(get_current_user)):
+    """Listar todos los productos"""
+    try:
+        with db_manager.get_db_session() as db:
+            producto_repo = ProductoRepository(db)
+            productos = producto_repo.listar_productos(skip=skip, limit=limit)
+
+            return [
+                ProductoResponse(
+                    id=producto.id,
+                    codigo_principal=producto.codigo_principal,
+                    codigo_auxiliar=producto.codigo_auxiliar,
+                    descripcion=producto.descripcion,
+                    precio_unitario=producto.precio_unitario,
+                    tipo=producto.tipo,
+                    codigo_impuesto=producto.codigo_impuesto,
+                    porcentaje_iva=producto.porcentaje_iva,
+                    activo=producto.activo,
+                    created_at=producto.created_at
+                ) for producto in productos
+            ]
+    except Exception as e:
+        logging.error(f"Error al listar productos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+
+@app.get("/productos/{producto_id}", response_model=ProductoResponse)
+async def obtener_producto(producto_id: int, current_user: dict = Depends(get_current_user)):
+    """Obtener producto por ID"""
+    try:
+        with db_manager.get_db_session() as db:
+            producto_repo = ProductoRepository(db)
+            producto = producto_repo.obtener_producto_por_id(producto_id)
+
+            if not producto:
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+            return ProductoResponse(
+                id=producto.id,
+                codigo_principal=producto.codigo_principal,
+                codigo_auxiliar=producto.codigo_auxiliar,
+                descripcion=producto.descripcion,
+                precio_unitario=producto.precio_unitario,
+                tipo=producto.tipo,
+                codigo_impuesto=producto.codigo_impuesto,
+                porcentaje_iva=producto.porcentaje_iva,
+                activo=producto.activo,
+                created_at=producto.created_at
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error al obtener producto {producto_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+
+# ============================================================================
+# ENDPOINTS DE FACTURAS
+# ============================================================================
+
+
 @app.post("/facturas/", response_model=FacturaResponse)
-async def crear_factura(factura_data: FacturaCreate):
+async def crear_factura(factura_data: FacturaCreate, current_user: dict = Depends(get_current_user)):
     """Crear una nueva factura electrónica"""
     try:
         with db_manager.get_db_session() as db:
@@ -640,6 +811,8 @@ async def crear_factura(factura_data: FacturaCreate):
                 fecha_emision=factura.fecha_emision,
                 clave_acceso=factura.clave_acceso,
                 subtotal_sin_impuestos=factura.subtotal_sin_impuestos,
+                subtotal_0=getattr(factura, 'subtotal_0', Decimal("0.00")),
+                subtotal_12=getattr(factura, 'subtotal_12', Decimal("0.00")),
                 iva_12=factura.iva_12,
                 valor_total=factura.valor_total,
                 estado_sri=factura.estado_sri,
@@ -650,6 +823,65 @@ async def crear_factura(factura_data: FacturaCreate):
         raise
     except Exception as e:
         logging.error(f"Error al crear factura: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+
+@app.get("/facturas/", response_model=List[FacturaResponse])
+async def listar_facturas(skip: int = 0, limit: int = 100, current_user: dict = Depends(get_current_user)):
+    """Listar todas las facturas"""
+    try:
+        with db_manager.get_db_session() as db:
+            factura_repo = FacturaRepository(db)
+            facturas = factura_repo.listar_facturas(skip=skip, limit=limit)
+
+            return [
+                FacturaResponse(
+                    id=factura.id,
+                    numero_comprobante=factura.numero_comprobante,
+                    fecha_emision=factura.fecha_emision,
+                    clave_acceso=factura.clave_acceso,
+                    subtotal_sin_impuestos=factura.subtotal_sin_impuestos,
+                    subtotal_0=getattr(factura, 'subtotal_0', Decimal("0.00")),
+                    subtotal_12=getattr(factura, 'subtotal_12', Decimal("0.00")),
+                    iva_12=factura.iva_12,
+                    valor_total=factura.valor_total,
+                    estado_sri=factura.estado_sri,
+                    created_at=factura.created_at
+                ) for factura in facturas
+            ]
+    except Exception as e:
+        logging.error(f"Error al listar facturas: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+
+@app.get("/facturas/{factura_id}", response_model=FacturaResponse)
+async def obtener_factura(factura_id: int, current_user: dict = Depends(get_current_user)):
+    """Obtener factura por ID"""
+    try:
+        with db_manager.get_db_session() as db:
+            factura_repo = FacturaRepository(db)
+            factura = factura_repo.obtener_factura_por_id(factura_id)
+
+            if not factura:
+                raise HTTPException(status_code=404, detail="Factura no encontrada")
+
+            return FacturaResponse(
+                id=factura.id,
+                numero_comprobante=factura.numero_comprobante,
+                fecha_emision=factura.fecha_emision,
+                clave_acceso=factura.clave_acceso,
+                subtotal_sin_impuestos=factura.subtotal_sin_impuestos,
+                subtotal_0=getattr(factura, 'subtotal_0', Decimal("0.00")),
+                subtotal_12=getattr(factura, 'subtotal_12', Decimal("0.00")),
+                iva_12=factura.iva_12,
+                valor_total=factura.valor_total,
+                estado_sri=factura.estado_sri,
+                created_at=factura.created_at
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error al obtener factura {factura_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 
@@ -921,20 +1153,9 @@ if __name__ == "__main__":
         print(f"✓ Directorio {dir_path} listo")
 
     # Iniciar servidor
-# Importar nuevas utilidades al inicio del archivo
-from utils.metrics import get_app_metrics, get_metrics_collector
-from utils.cache import get_cache_stats
-from utils.validators import validate_and_raise, BusinessValidator
-from config.logging_config import setup_logging, get_logger
-from datetime import datetime
-import time
 
-# Configurar logging mejorado
-setup_logging()
-logger = get_logger(__name__)
-
-# Obtener instancias de métricas
-app_metrics = get_app_metrics()
+    # Obtener instancias de métricas
+    app_metrics = get_app_metrics()
 
 # Endpoints de monitoreo y métricas
 @app.get("/metrics")

@@ -82,7 +82,7 @@ class FacturasPage:
         if search_term:
             params["search"] = search_term
         
-        facturas = self.api_client.get("/facturas", params)
+        facturas = self.api_client.get("/facturas/", params)
         
         if facturas:
             # Estadísticas rápidas
@@ -172,12 +172,12 @@ class FacturasPage:
                     "Tipo de cliente:",
                     ["Seleccionar existente", "Crear nuevo"]
                 )
-                
+
                 if cliente_option == "Seleccionar existente":
-                    clientes = self.api_client.get("/clientes")
+                    clientes = self.api_client.get("/clientes/")
                     if clientes:
                         cliente_options = {
-                            f"{c['razon_social']} - {c['identificacion']}": c['id'] 
+                            f"{c['razon_social']} - {c['identificacion']}": c['id']
                             for c in clientes
                         }
                         cliente_seleccionado = st.selectbox(
@@ -207,7 +207,7 @@ class FacturasPage:
             col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
             
             with col1:
-                productos = self.api_client.get("/productos")
+                productos = self.api_client.get("/productos/")
                 if productos:
                     producto_options = {
                         f"{p['descripcion']} - {format_currency(p['precio_unitario'])}": p 
@@ -235,11 +235,11 @@ class FacturasPage:
                 producto = producto_options[producto_sel]
                 detalle = {
                     "codigo_principal": producto['codigo_principal'],
+                    "codigo_auxiliar": producto.get('codigo_auxiliar'),
                     "descripcion": producto['descripcion'],
                     "cantidad": cantidad,
                     "precio_unitario": precio_unit,
-                    "descuento": descuento,
-                    "subtotal": cantidad * precio_unit * (1 - descuento/100)
+                    "descuento": descuento
                 }
                 st.session_state.factura_detalles.append(detalle)
                 st.rerun()
@@ -248,20 +248,26 @@ class FacturasPage:
             if st.session_state.factura_detalles:
                 st.markdown("##### Productos Agregados:")
                 df_detalles = pd.DataFrame(st.session_state.factura_detalles)
+
+                # Calcular subtotal para cada detalle
+                df_detalles['subtotal'] = df_detalles.apply(
+                    lambda row: row['cantidad'] * row['precio_unitario'] * (1 - row['descuento']/100),
+                    axis=1
+                )
                 df_detalles['precio_unitario_fmt'] = df_detalles['precio_unitario'].apply(format_currency)
                 df_detalles['subtotal_fmt'] = df_detalles['subtotal'].apply(format_currency)
-                
+
                 st.dataframe(
                     df_detalles[['descripcion', 'cantidad', 'precio_unitario_fmt', 'descuento', 'subtotal_fmt']],
                     use_container_width=True,
                     hide_index=True
                 )
-                
+
                 # Totales
-                subtotal = sum(d['subtotal'] for d in st.session_state.factura_detalles)
+                subtotal = df_detalles['subtotal'].sum()
                 iva = subtotal * 0.12
                 total = subtotal + iva
-                
+
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Subtotal", format_currency(subtotal))
@@ -304,10 +310,11 @@ class FacturasPage:
         try:
             factura_data = {
                 "cliente_id": cliente_id,
+                "fecha_emision": datetime.now().isoformat(),
                 "detalles": st.session_state.factura_detalles,
                 "observaciones": observaciones
             }
-            
+
             # Si es cliente nuevo, agregarlo a los datos
             if cliente_option == "Crear nuevo":
                 factura_data["cliente_nuevo"] = {
@@ -316,14 +323,14 @@ class FacturasPage:
                     "razon_social": st.session_state.get("razon_social"),
                     "email": st.session_state.get("email")
                 }
-            
-            resultado = self.api_client.post("/facturas", factura_data)
-            
+
+            resultado = self.api_client.post("/facturas/", factura_data)
+
             if resultado:
                 show_success_message(f"Factura creada: {resultado['numero_comprobante']}")
                 st.session_state.factura_detalles = []
                 st.rerun()
-            
+
         except Exception as e:
             show_error_message(f"Error al crear factura: {str(e)}")
     
@@ -386,7 +393,7 @@ class FacturasPage:
         
         with col2:
             st.markdown("#### Consulta Masiva")
-            facturas_pendientes = self.api_client.get("/facturas?estado=FIRMADO")
+            facturas_pendientes = self.api_client.get("/facturas/?estado=FIRMADO")
             
             if facturas_pendientes:
                 st.info(f"Hay {len(facturas_pendientes)} facturas pendientes de autorización")
@@ -465,7 +472,7 @@ class ClientesPage:
             activo_filter = st.selectbox("Estado", ["Todos", "Activo", "Inactivo"])
         
         # Obtener clientes
-        clientes = self.api_client.get("/clientes")
+        clientes = self.api_client.get("/clientes/")
         
         if clientes:
             df = pd.DataFrame(clientes)
@@ -592,7 +599,7 @@ class ClientesPage:
                 "email": email
             }
             
-            resultado = self.api_client.post("/clientes", cliente_data)
+            resultado = self.api_client.post("/clientes/", cliente_data)
             
             if resultado:
                 show_success_message(f"Cliente creado exitosamente: {razon_social}")
