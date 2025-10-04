@@ -306,3 +306,73 @@ Password: usuario123
 ---
 
 **Estado del Sistema: ✅ LISTO PARA PRODUCCIÓN**
+
+
+
+** Cambios Realizados: **
+Actualizar requirements.txt
+
+fastapi==0.104.1
+uvicorn==0.24.0
+sqlalchemy==2.0.23
+pymysql==1.1.0
+cryptography>=41.0.0
+lxml==5.0.0
+reportlab==4.0.7
+Pillow==10.4.0
+python-multipart==0.0.6
+jinja2==3.1.2
+requests==2.31.0
+pydantic>=2.8.0
+pydantic-settings>=2.0.0
+python-jose[cryptography]==3.3.0
+# Cambiar estas dos líneas:
+bcrypt==4.0.1
+passlib==1.7.4
+# FIN DE CAMBIOS
+python-dotenv==1.0.0
+signxml>=3.2.0
+xhtml2pdf==0.2.16
+weasyprint==60.2
+aiosmtplib==3.0.1
+email-validator==2.1.0
+python-dateutil==2.8.2
+openpyxl==3.1.2
+pandas>=2.2.0
+xmltodict==0.13.0
+
+# Frontend dependencies
+streamlit>=1.37.0
+streamlit-authenticator==0.2.3
+streamlit-option-menu==0.3.6
+plotly==5.17.0
+altair==5.1.2
+extra-streamlit-components==0.1.60
+
+# Nuevas dependencias para mejoras
+pyopenssl>=23.0.0
+psutil>=5.9.0
+schedule>=1.2.0
+
+-- Fin de requirements.txt --
+
+# ** Reinstalar las dependencias: **
+cd C:\Facturacion (Carpeta del Sistema)
+venv\Scripts\activate
+
+# Desinstalar las versiones problemáticas
+pip uninstall passlib bcrypt -y
+
+# Instalar las versiones correctas
+pip install bcrypt==4.0.1 passlib==1.7.4
+
+# Verificar instalación
+python -c "from passlib.context import CryptContext; pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto'); print('OK:', pwd_context.hash('test'))"
+
+Si ves un hash bcrypt (algo como $2b$12$...), entonces funciona correctamente.
+
+# Reiniciar el backend:
+run_backend.bat
+
+Deberías ver que el servidor inicia sin errores. El problema era que passlib[bcrypt] instalaba automáticamente la última versión de bcrypt (probablemente 4.2.x), que tiene cambios que rompen la compatibilidad con passlib 1.7.4.
+La solución es usar bcrypt==4.0.1 que es la última versión compatible con passlib 1.7.4.

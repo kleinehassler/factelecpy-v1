@@ -221,21 +221,37 @@ def init_session_state():
         "filters": {},
         "theme": "light"
     }
-    
+
     for key, value in default_values.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
 def clear_session_state():
     """Limpiar estado de sesión"""
     keys_to_clear = [
         "authenticated", "token", "user_data", "factura_detalles",
-        "selected_items", "filters"
+        "selected_items", "filters", "current_page"
     ]
-    
+
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
+
+def init_session_state():
+    """Inicializar estado de sesión"""
+    default_values = {
+        "authenticated": False,
+        "token": None,
+        "user_data": None,
+        "current_page": "dashboard",
+        "factura_detalles": [],
+        "selected_items": [],
+        "filters": {},
+        "theme": "light"
+    }
+
+    for key, value in default_values.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 def get_page_config():
     """Obtener configuración de página"""

@@ -3,19 +3,8 @@ Páginas específicas para el sistema de facturación electrónica
 """
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional
-import requests
-import json
-
-from utils import (
-    format_currency, format_date, create_metric_card, create_status_badge,
-    display_factura_table, create_sales_chart, create_pie_chart,
-    validate_ruc, validate_cedula, show_success_message, show_error_message,
-    DataValidator, create_export_options, create_search_filter,
-    create_date_range_filter, create_status_filter, display_summary_stats
-)
+from datetime import datetime
+from typing import Dict
 
 class FacturasPage:
     """Página de gestión de facturas"""
@@ -128,44 +117,108 @@ class FacturasPage:
                 # Mostrar tabla
                 display_df = df.rename(columns=columns_display)[list(columns_display.values())]
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
-                
+
                 # Acciones masivas
                 if selected_facturas:
                     st.markdown("### 🔧 Acciones")
-                    col1, col2, col3, col4 = st.columns(4)
-                    
+                    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
                     with col1:
                         if st.button("📧 Enviar Email", key="send_email"):
                             self._enviar_facturas_email(selected_facturas)
-                    
+
                     with col2:
                         if st.button("📄 Descargar PDF", key="download_pdf"):
                             self._descargar_facturas_pdf(selected_facturas)
-                    
+
                     with col3:
-                        if st.button("🔄 Consultar SRI", key="check_sri"):
-                            self._consultar_estado_sri(selected_facturas)
-                    
+                        if st.button("🔄 Generar XML", key="generate_xml"):
+                            for factura_id in selected_facturas:
+                                self._generar_xml_factura(factura_id)
+
                     with col4:
-                        if st.button("📊 Exportar Excel", key="export_excel"):
-                            self._exportar_excel(selected_facturas)
+                        if st.button("✍️ Firmar", key="sign"):
+                            for factura_id in selected_facturas:
+                                self._firmar_factura(factura_id)
+
+                    with col5:
+                        if st.button("🚀 Enviar SRI", key="send_sri"):
+                            for factura_id in selected_facturas:
+                                self._enviar_sri(factura_id)
+
+                    with col6:
+                        if st.button("🔍 Consultar SRI", key="check_sri"):
+                            for factura_id in selected_facturas:
+                                self._consultar_autorizacion(factura_id)
+
+                        # Columnas a mostrar
+                        columns_display = {
+                            'numero_comprobante': 'Número',
+                            'fecha_emision': 'Fecha',
+                            'cliente_nombre': 'Cliente',
+                            'valor_total_fmt': 'Total',
+                            'estado_badge': 'Estado'
+                        }
+
+                        # Selección de facturas (permitir seleccionar por acciones individuales)
+                        selected_facturas = st.multiselect(
+                            "Seleccionar facturas para acciones:",
+                            options=df['id'].tolist(),
+                            format_func=lambda x: df[df['id']==x]['numero_comprobante'].iloc[0]
+                        )
+
+                        # Mostrar tabla de facturas
+                        display_df = df.rename(columns=columns_display)[list(columns_display.values())]
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+                        # Acciones individuales por factura
+                        if selected_facturas:
+                            st.markdown("### 🔧 Acciones Individuales")
+                            for factura_id in selected_facturas:
+                                factura = df[df['id'] == factura_id].iloc[0]
+                                with st.expander(f"Factura {factura['numero_comprobante']} - {factura['cliente_nombre']}"):
+                                    col1, col2, col3, col4, col5 = st.columns(5)
+
+                                    with col1:
+                                        if st.button("📧 Email", key=f"email_{factura_id}"):
+                                            self._enviar_facturas_email([factura_id])
+
+                                    with col2:
+                                        if st.button("📄 PDF", key=f"pdf_{factura_id}"):
+                                            self._descargar_facturas_pdf([factura_id])
+
+                                    with col3:
+                                        if st.button("📜 XML", key=f"xml_{factura_id}"):
+                                            self._generar_xml_factura(factura_id)
+
+                                    with col4:
+                                        if factura.get('estado_sri') == 'GENERADO' and st.button("✍️ Firmar", key=f"sign_{factura_id}"):
+                                            self._firmar_factura(factura_id)
+
+                                    with col5:
+                                        if factura.get('estado_sri') == 'FIRMADO' and st.button("🚀 Enviar SRI", key=f"sri_{factura_id}"):
+                                            self._enviar_sri(factura_id)
+
+                                    # Consultar autorización (si aplica)
+                                    if factura.get('estado_sri') in ['ENVIADO_SRI', 'FIRMADO'] and st.button("🔍 Consultar Autorización", key=f"auth_{factura_id}"):
+                                        self._consultar_autorizacion(factura_id)
         else:
             st.info("No se encontraron facturas con los filtros aplicados")
-    
+
     def _render_nueva_factura(self):
         """Renderizar formulario de nueva factura"""
         st.subheader("➕ Nueva Factura Electrónica")
-        
+
         # Inicializar estado de sesión para detalles
         if 'factura_detalles' not in st.session_state:
             st.session_state.factura_detalles = []
-        
+
         with st.form("nueva_factura_form"):
             # Sección 1: Datos del cliente
             st.markdown("#### 👤 Datos del Cliente")
-            
+
             col1, col2 = st.columns(2)
-            
+
             with col1:
                 # Selección de cliente existente o nuevo
                 cliente_option = st.radio(
@@ -181,7 +234,7 @@ class FacturasPage:
                             for c in clientes
                         }
                         cliente_seleccionado = st.selectbox(
-                            "Cliente", 
+                            "Cliente",
                             options=list(cliente_options.keys())
                         )
                         cliente_id = cliente_options.get(cliente_seleccionado)
@@ -190,18 +243,23 @@ class FacturasPage:
                         cliente_id = None
                 else:
                     cliente_id = None
-            
+
             with col2:
                 if cliente_option == "Crear nuevo":
                     tipo_id = st.selectbox("Tipo ID", ["05", "04", "06", "07", "08"])
                     identificacion = st.text_input("Identificación")
                     razon_social = st.text_input("Razón Social")
                     email = st.text_input("Email")
-            
-            st.markdown("---")
-            
-            # Sección 2: Productos
-            st.markdown("#### 📦 Productos/Servicios")
+
+                    # Validaciones en tiempo real
+                    if identificacion:
+                        if tipo_id == "05" and not DataValidator.validate_identification("05", identificacion):
+                            st.error("❌ Cédula inválida")
+                        elif tipo_id == "04" and not DataValidator.validate_identification("04", identificacion):
+                            st.error("❌ RUC inválido")
+
+                    if email and not DataValidator.validate_email(email):
+                        st.error("❌ Email inválido")
             
             # Agregar producto
             col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
@@ -217,15 +275,24 @@ class FacturasPage:
                 else:
                     st.warning("No hay productos registrados")
                     producto_sel = None
-            
+
             with col2:
                 cantidad = st.number_input("Cantidad", min_value=0.01, value=1.0, step=0.01)
-            
+                # Validar cantidad positiva
+                if cantidad <= 0:
+                    st.error("❌ La cantidad debe ser mayor a 0")
+
             with col3:
                 precio_unit = st.number_input("Precio Unit.", min_value=0.01, value=1.0, step=0.01)
-            
+                # Validar precio positivo
+                if precio_unit <= 0:
+                    st.error("❌ El precio unitario debe ser mayor a 0")
+
             with col4:
                 descuento = st.number_input("Desc. %", min_value=0.0, max_value=100.0, value=0.0)
+                # Validar rango de descuento
+                if descuento < 0 or descuento > 100:
+                    st.error("❌ El descuento debe estar entre 0 y 100%")
             
             with col5:
                 agregar_producto = st.form_submit_button("➕ Agregar")
@@ -243,66 +310,233 @@ class FacturasPage:
                 }
                 st.session_state.factura_detalles.append(detalle)
                 st.rerun()
-            
-            # Mostrar productos agregados
-            if st.session_state.factura_detalles:
-                st.markdown("##### Productos Agregados:")
-                df_detalles = pd.DataFrame(st.session_state.factura_detalles)
 
-                # Calcular subtotal para cada detalle
-                df_detalles['subtotal'] = df_detalles.apply(
-                    lambda row: row['cantidad'] * row['precio_unitario'] * (1 - row['descuento']/100),
-                    axis=1
-                )
-                df_detalles['precio_unitario_fmt'] = df_detalles['precio_unitario'].apply(format_currency)
-                df_detalles['subtotal_fmt'] = df_detalles['subtotal'].apply(format_currency)
-
-                st.dataframe(
-                    df_detalles[['descripcion', 'cantidad', 'precio_unitario_fmt', 'descuento', 'subtotal_fmt']],
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                # Totales
-                subtotal = df_detalles['subtotal'].sum()
-                iva = subtotal * 0.12
-                total = subtotal + iva
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Subtotal", format_currency(subtotal))
-                with col2:
-                    st.metric("IVA 12%", format_currency(iva))
-                with col3:
-                    st.metric("TOTAL", format_currency(total))
-                
-                if st.form_submit_button("🗑️ Limpiar Productos"):
-                    st.session_state.factura_detalles = []
-                    st.rerun()
-            
             st.markdown("---")
-            
+
             # Sección 3: Información adicional
             st.markdown("#### 📝 Información Adicional")
             observaciones = st.text_area("Observaciones")
-            
-            # Botón crear factura
+
+            # Botón crear factura (botón principal del formulario)
             crear_factura = st.form_submit_button("💾 Crear Factura", type="primary")
-            
+
             if crear_factura:
                 if self._validar_factura(cliente_id, cliente_option):
                     self._crear_factura(cliente_id, cliente_option, observaciones)
-    
+            
     def _validar_factura(self, cliente_id, cliente_option):
         """Validar datos de la factura"""
         if cliente_option == "Seleccionar existente" and not cliente_id:
             show_error_message("Debe seleccionar un cliente")
             return False
-        
+
         if not st.session_state.factura_detalles:
             show_error_message("Debe agregar al menos un producto")
             return False
-        
+
+        # Validar cliente nuevo si es necesario
+        if cliente_option == "Crear nuevo":
+            # Tomar valores desde la sesión, usando strings vacíos por defecto
+            tipo_id = st.session_state.get("tipo_id", "")
+            identificacion = st.session_state.get("identificacion", "")
+            razon_social = st.session_state.get("razon_social", "")
+            email = st.session_state.get("email", "")
+
+            if not identificacion or not razon_social:
+                show_error_message("Debe completar los datos del cliente")
+                return False
+
+            # Guardar datos temporales del cliente en la sesión para que estén
+            # disponibles más adelante al crear la factura
+            st.session_state["cliente_nuevo_temp"] = {
+                "tipo_identificacion": tipo_id,
+                "identificacion": identificacion,
+                "razon_social": razon_social,
+                "email": email
+            }
+
+            # Validar identificación según tipo
+            if not DataValidator.validate_identification(tipo_id, identificacion):
+                if tipo_id == "05":
+                    show_error_message("Cédula inválida")
+                elif tipo_id == "04":
+                    show_error_message("RUC inválido")
+                else:
+                    show_error_message("Identificación inválida")
+                return False
+
+            # Validar email si se proporciona
+            if email and not DataValidator.validate_email(email):
+                show_error_message("Email inválido")
+                return False
+
+        # Validar detalles de productos
+        for detalle in st.session_state.factura_detalles:
+            if detalle.get("cantidad", 0) <= 0:
+                show_error_message("La cantidad de todos los productos debe ser mayor a 0")
+                return False
+
+            if detalle.get("precio_unitario", 0) <= 0:
+                show_error_message("El precio unitario de todos los productos debe ser mayor a 0")
+                return False
+
+            if detalle.get("descuento", 0) < 0 or detalle.get("descuento", 0) > 100:
+                show_error_message("El descuento debe estar entre 0 y 100%")
+                return False
+        return True
+
+    def _crear_factura(self, cliente_id, cliente_option, observaciones):
+        """Crear nueva factura"""
+        try:
+            factura_data = {
+                "cliente_id": cliente_id,
+                "fecha_emision": datetime.now().isoformat(),
+                "detalles": st.session_state.factura_detalles,
+                "observaciones": observaciones
+            }
+
+            # Si es cliente nuevo, agregarlo a los datos
+            if cliente_option == "Crear nuevo":
+                factura_data["cliente_nuevo"] = {
+                    "tipo_identificacion": st.session_state.get("tipo_id"),
+                    "identificacion": st.session_state.get("identificacion"),
+                    "razon_social": st.session_state.get("razon_social"),
+                    "email": st.session_state.get("email")
+                }
+
+            resultado = self.api_client.post("/facturas/", factura_data)
+
+            if resultado:
+                show_success_message(f"Factura creada: {resultado['numero_comprobante']}")
+                st.session_state.factura_detalles = []
+                st.rerun()
+
+        except Exception as e:
+            show_error_message(f"Error al crear factura: {str(e)}")
+
+    def _generar_xml_factura(self, factura_id):
+        """Generar XML de factura"""
+        try:
+            resultado = self.api_client.post(f"/facturas/{factura_id}/generar-xml", {})
+            if resultado:
+                show_success_message("XML generado exitosamente")
+                return True
+            return False
+        except Exception as e:
+            show_error_message(f"Error generando XML: {str(e)}")
+            return False
+
+    def _firmar_factura(self, factura_id):
+        """Firmar factura con certificado digital"""
+        try:
+            resultado = self.api_client.post(f"/facturas/{factura_id}/firmar", {})
+            if resultado:
+                show_success_message("Factura firmada exitosamente")
+                return True
+            return False
+        except Exception as e:
+            show_error_message(f"Error firmando factura: {str(e)}")
+            return False
+
+    def _enviar_sri(self, factura_id):
+        """Enviar factura al SRI"""
+        try:
+            resultado = self.api_client.post(f"/facturas/{factura_id}/enviar-sri", {})
+            if resultado:
+                show_success_message("Factura enviada al SRI exitosamente")
+                return True
+            return False
+        except Exception as e:
+            show_error_message(f"Error enviando factura al SRI: {str(e)}")
+            return False
+
+    def _consultar_autorizacion(self, factura_id):
+        """Consultar autorización en el SRI"""
+        try:
+            resultado = self.api_client.post(f"/facturas/{factura_id}/consultar-autorizacion", {})
+            if resultado:
+                show_success_message(f"Estado: {resultado.get('estado', 'Desconocido')}")
+                return True
+            return False
+        except Exception as e:
+            show_error_message(f"Error consultando autorización: {str(e)}")
+            return False
+
+    def _render_consultas_sri(self):
+        """Renderizar consultas al SRI"""
+        st.subheader("🔍 Consultas al SRI")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### Consulta por Clave de Acceso")
+            clave_acceso = st.text_input("Clave de Acceso (49 dígitos)")
+
+            if st.button("🔍 Consultar Estado"):
+                if len(clave_acceso) == 49:
+                    try:
+                        resultado = self.api_client.get(f"/sri/consultar/{clave_acceso}")
+                        if resultado:
+                            st.json(resultado)
+                        else:
+                            show_error_message("No se obtuvo respuesta del SRI para la clave proporcionada")
+                    except Exception as e:
+                        show_error_message(f"Error consultando al SRI: {str(e)}")
+                else:
+                    show_error_message("La clave de acceso debe tener 49 dígitos")
+
+        with col2:
+            st.markdown("#### Consulta Masiva")
+            try:
+                facturas_pendientes = self.api_client.get("/facturas/?estado=FIRMADO")
+            except Exception as e:
+                facturas_pendientes = None
+                show_error_message(f"Error obteniendo facturas pendientes: {str(e)}")
+
+            if facturas_pendientes:
+                st.info(f"Hay {len(facturas_pendientes)} facturas pendientes de autorización")
+
+                if st.button("🔄 Consultar Todas"):
+                    errores = []
+                    éxitos = 0
+                    for factura in facturas_pendientes:
+                        try:
+                            resp = self.api_client.post(f"/facturas/{factura['id']}/consultar-sri", {})
+                            if resp:
+                                éxitos += 1
+                        except Exception as e:
+                            errores.append(f"ID {factura.get('id')}: {str(e)}")
+                    if éxitos:
+                        show_success_message(f"Se enviaron {éxitos} consultas al SRI")
+                    if errores:
+                        show_error_message(f"Errores en algunas consultas: {'; '.join(errores)}")
+            if not DataValidator.validate_identification(tipo_id, identificacion):
+                if tipo_id == "05":
+                    show_error_message("Cédula inválida")
+                elif tipo_id == "04":
+                    show_error_message("RUC inválido")
+                else:
+                    show_error_message("Identificación inválida")
+                return False
+
+            # Validar email si se proporciona
+            if email and not DataValidator.validate_email(email):
+                show_error_message("Email inválido")
+                return False
+
+        # Validar detalles de productos
+        for detalle in st.session_state.factura_detalles:
+            if detalle.get("cantidad", 0) <= 0:
+                show_error_message("La cantidad de todos los productos debe ser mayor a 0")
+                return False
+
+            if detalle.get("precio_unitario", 0) <= 0:
+                show_error_message("El precio unitario de todos los productos debe ser mayor a 0")
+                return False
+
+            if detalle.get("descuento", 0) < 0 or detalle.get("descuento", 0) > 100:
+                show_error_message("El descuento debe estar entre 0 y 100%")
+                return False
         return True
     
     def _crear_factura(self, cliente_id, cliente_option, observaciones):

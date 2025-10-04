@@ -5,9 +5,11 @@ Desarrollado con Streamlit - Versión Mejorada
 import streamlit as st
 import requests
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
+import json
+from typing import Dict, List, Optional
+import base64
+from io import BytesIO
 import json
 from typing import Dict, List, Optional
 import base64
@@ -27,6 +29,7 @@ from utils import (
 from pages import FacturasPage, ClientesPage
 
 # Configuración de la página
+# Configuración de la página
 st.set_page_config(**get_page_config())
 
 # Aplicar CSS personalizado
@@ -34,47 +37,48 @@ apply_custom_css()
 
 class APIClient:
     """Cliente mejorado para comunicación con la API FastAPI"""
-    
+
     def __init__(self, base_url: str):
         self.base_url = base_url
-        self.token = None
+        # Obtener token del estado de sesión si existe
+        self.token = st.session_state.get("token", None)
         self.session = requests.Session()
-    
-    def login(self, username: str, password: str) -> bool:
-        """Autenticar usuario"""
+
+    def _set_token(self, token: Optional[str]):
+        """Establecer o limpiar token tanto en el cliente como en session_state"""
         try:
-            response = self.session.post(
-                f"{self.base_url}/auth/login",
-                data={"username": username, "password": password},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                self.token = data["access_token"]
-                st.session_state.token = self.token
+            self.token = token
+            if token:
+                st.session_state.token = token
                 st.session_state.authenticated = True
-                st.session_state.user_data = data.get("user_data", {})
-                return True
-            return False
-            
-        except requests.exceptions.RequestException as e:
-            show_message("connection_error", f"Error de conexión: {str(e)}")
-            return False
-        except Exception as e:
-            show_message("error", f"Error inesperado: {str(e)}")
-            return False
-    
+            else:
+                # Limpiar estado
+                st.session_state.token = None
+                st.session_state.authenticated = False
+        except Exception:
+            # No querer fallar por errores al sincronizar el estado de sesión
+            pass
+
     def get_headers(self) -> Dict:
         """Obtener headers con token de autenticación"""
-        if not self.token and "token" in st.session_state:
-            self.token = st.session_state.token
-        
-        return {
-            "Authorization": f"Bearer {self.token}",
+        headers = {
             "Content-Type": "application/json"
         }
-    
+
+        # Sincronizar el token desde el estado de sesión si está presente
+        token_in_state = st.session_state.get("token")
+        if token_in_state:
+            self.token = token_in_state
+            headers["Authorization"] = f"Bearer {self.token}"
+        elif self.token:
+            # Si hay token en el cliente pero no en session_state, usar el del cliente
+            headers["Authorization"] = f"Bearer {self.token}"
+        else:
+            # Si no hay token en ningún lugar, asegurarse de que no haya header de autorización
+            self.session.headers.pop("Authorization", None)
+
+        return headers
+
     def get(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
         """Realizar petición GET"""
         try:
@@ -84,7 +88,7 @@ class APIClient:
                 params=params,
                 timeout=30
             )
-            
+
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 401:
@@ -93,24 +97,72 @@ class APIClient:
             else:
                 show_message("error", f"Error en petición: {response.status_code}")
                 return None
-                
+
         except requests.exceptions.RequestException as e:
             show_message("connection_error", f"Error de conexión: {str(e)}")
             return None
         except Exception as e:
             show_message("error", f"Error inesperado: {str(e)}")
             return None
-    
+
+    def login(self, username: str, password: str) -> bool:
+        """Autenticar usuario (único método de login, reemplaza duplicados)"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/auth/login",
+                data={"username": username, "password": password},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                access_token = data.get("access_token")
+                if access_token:
+                    # Centralizar el manejo del token
+                    self._set_token(access_token)
+                    st.session_state.user_data = data.get("user_data", {})
+                    return True
+                else:
+                    show_message("error", "Respuesta inválida del servidor: falta access_token")
+                    return False
+            elif response.status_code == 401:
+                # Manejar específicamente credenciales incorrectas
+                show_message("login_error", "Credenciales incorrectas")
+                # Asegurar limpieza de token en caso de login fallido
+                self._set_token(None)
+                return False
+            else:
+                # Otros errores
+                show_message("error", f"Error de autenticación: {response.status_code}")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            show_message("connection_error", f"Error de conexión: {str(e)}")
+            return False
+        except Exception as e:
+            show_message("error", f"Error inesperado: {str(e)}")
+            return False
+
     def post(self, endpoint: str, data: Dict) -> Optional[Dict]:
         """Realizar petición POST"""
         try:
+            # Intentar refrescar el token antes de realizar la petición para evitar errores 401
+            try:
+                self._refresh_token_if_needed()
+            except Exception:
+                # No bloquear la petición si el refresco falla; se manejará según el status HTTP
+                pass
+
+            headers = self.get_headers() or {}
+            payload = data if data is not None else {}
+
             response = self.session.post(
                 f"{self.base_url}{endpoint}",
-                json=data,
-                headers=self.get_headers(),
+                json=payload,
+                headers=headers,
                 timeout=30
             )
-            
+
             if response.status_code in [200, 201]:
                 return response.json()
             elif response.status_code == 401:
@@ -120,118 +172,136 @@ class APIClient:
                 error_msg = response.text if response.text else f"Error {response.status_code}"
                 show_message("error", f"Error en petición: {error_msg}")
                 return None
-                
+
         except requests.exceptions.RequestException as e:
             show_message("connection_error", f"Error de conexión: {str(e)}")
             return None
         except Exception as e:
             show_message("error", f"Error inesperado: {str(e)}")
             return None
-    
-    def _handle_unauthorized(self):
-        """Manejar error de autorización"""
-        show_message("error", "Sesión expirada. Por favor, inicie sesión nuevamente.")
+
+    def _refresh_token_if_needed(self):
+        """Verificar si el token es válido y refrescar si es necesario"""
+        # Esta función podría implementarse para verificar la validez del token
+        # con el backend si fuera necesario. Ejemplo de acciones posibles:
+        # - Llamar a un endpoint /auth/refresh para obtener un nuevo token.
+        # - Actualizar st.session_state.token y self.token si se renueva correctamente.
+        # - Si la renovación falla, llamar a _handle_unauthorized().
+        #
+        # Implementación por defecto: no hace nada (placeholder).
+        try:
+            # Intento básico: si no hay token, no hay nada que refrescar.
+            if not (self.token or st.session_state.get("token")):
+                return False
+            # Aquí podría ir la lógica real de refresh, por ahora retornamos False indicando que no se refrescó.
+            return False
+        except Exception as e:
+            # En caso de error al intentar refrescar, tratamos como no autorizado.
+            show_message("error", f"Error al refrescar token: {str(e)}")
+            return False
         clear_session_state()
         st.rerun()
 
 # Inicializar cliente API
-@st.cache_resource
+# Eliminamos @st.cache_resource para evitar problemas de persistencia
 def get_api_client():
-    return APIClient(get_api_base_url())
+    # Usar el cliente API almacenado en session_state si existe
+    if "api_client" not in st.session_state:
+        st.session_state.api_client = APIClient(get_api_base_url())
+    return st.session_state.api_client
 
+# Usar el cliente API persistente
 api_client = get_api_client()
 
 def login_page():
     """Página de login mejorada"""
-    st.markdown('<h1 class="main-header">🧾 Sistema de Facturación Electrónica SRI Ecuador</h1>', 
-                unsafe_allow_html=True)
+    # ELIMINAR EL BLOQUE DE VALIDACIÓN QUE LIMPIA EL ESTADO
     
-    # Información del sistema
+    st.markdown('<h1 class="main-header">🧾 Sistema de Facturación Electrónica SRI Ecuador</h1>',
+                unsafe_allow_html=True)
+
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
-        
+
         with col2:
             st.markdown("""
             <div class="info-box">
-                <h3>🏢 Sistema Completo de Facturación Electrónica</h3>
-                <ul>
-                    <li>✅ Cumple con normativa SRI v2.0.0</li>
-                    <li>✅ Firma digital XAdES-BES</li>
-                    <li>✅ Generación automática de RIDE</li>
-                    <li>✅ Integración con servicios web SRI</li>
-                    <li>✅ Envío automático por email</li>
-                </ul>
             </div>
             """, unsafe_allow_html=True)
             
-            st.markdown("---")
-            
-            # Formulario de login
             st.subheader("🔐 Iniciar Sesión")
-            
+
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("👤 Usuario", placeholder="Ingrese su usuario")
-                password = st.text_input("🔒 Contraseña", type="password", placeholder="Ingrese su contraseña")
-                
+                password = st.text_input("🔑 Contraseña", type="password", placeholder="Ingrese su contraseña")
+
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
                     submit_button = st.form_submit_button("🚀 Ingresar al Sistema", type="primary")
-                
+
                 if submit_button:
                     if username and password:
                         with st.spinner("Verificando credenciales..."):
                             if api_client.login(username, password):
                                 show_message("login_success")
                                 st.balloons()
-                                st.rerun()
+                                st.rerun()  # Este rerun ahora funcionará correctamente
                             else:
                                 show_message("login_error")
                     else:
                         show_message("error", "Por favor ingrese usuario y contraseña")
-            
-            # Información adicional
-            with st.expander("ℹ️ Información del Sistema"):
+
+
+
                 st.markdown("""
-                **Versión:** 1.0.0  
-                **Desarrollado para:** Empresas ecuatorianas  
-                **Cumplimiento:** Normativa SRI Ecuador  
-                **Soporte:** soporte@empresa.com  
+                **Versión:** 1.0.0
+                **Desarrollado para:** Empresas ecuatorianas
+                **Cumplimiento:** Normativa SRI Ecuador
+                **Soporte:** soporte@empresa.com
                 """)
 
 def sidebar_navigation():
     """Navegación lateral mejorada"""
     with st.sidebar:
         st.markdown("### 📊 Menú Principal")
-        
+
         # Información del usuario
         if st.session_state.get("user_data"):
             user_data = st.session_state.user_data
             st.markdown(f"👤 **{user_data.get('username', 'Usuario')}**")
             st.markdown(f"🏢 **{user_data.get('empresa', 'Mi Empresa')}**")
             st.markdown("---")
-        
+
         # Opciones de menú
         menu_options = get_menu_options()
-        
+
         selected = None
         for option in menu_options:
             if st.button(f"{option['icon']} {option['label']}", key=option['key'], use_container_width=True):
                 selected = option['key']
                 break
-        
+
         # Si no se seleccionó nada, mantener la página actual
         if not selected:
             selected = st.session_state.get("current_page", "dashboard")
         else:
             st.session_state.current_page = selected
-        
+
         # Manejar cerrar sesión
         if selected == "logout":
+            # Limpiar el estado actual
             clear_session_state()
+            # Intentar re-inicializar el estado de sesión si existe la función
+            try:
+                init_session_state()
+            except Exception:
+                # Si la función no existe o falla, continuar con la limpieza previa
+                pass
+            # Forzar recarga para reflejar el estado limpio
             st.rerun()
-        
+
         st.markdown("---")
-        
+
         # Estado del sistema
         st.markdown("### 🔧 Estado del Sistema")
         
@@ -439,19 +509,52 @@ def productos_page():
                 codigo_impuesto = st.selectbox("Código Impuesto", ["2", "3", "5"], index=0)
                 porcentaje_iva = st.number_input("Porcentaje IVA", value=0.12, step=0.01, format="%.4f")
                 activo = st.checkbox("Activo", value=True)
-            
-            # Validaciones
+
+            # Validaciones de campos del formulario
+            # Código principal
             if codigo_principal and len(codigo_principal) > 25:
                 st.error("❌ El código principal no puede tener más de 25 caracteres")
-            
+            # Código auxiliar
+            if codigo_auxiliar and len(codigo_auxiliar) > 25:
+                st.error("❌ El código auxiliar no puede tener más de 25 caracteres")
+            # Descripción
             if descripcion and len(descripcion) > 300:
                 st.error("❌ La descripción no puede tener más de 300 caracteres")
-            
+            # Precio unitario debe ser positivo
+            if precio_unitario <= 0:
+                st.error("❌ El precio unitario debe ser mayor a 0")
+            # Porcentaje de IVA en rango 0-1 (0% - 100%)
+            if porcentaje_iva < 0 or porcentaje_iva > 1:
+                st.error("❌ El porcentaje de IVA debe estar entre 0 y 1 (0% y 100%)")
+
             # Botón guardar
             guardar_producto = st.form_submit_button("💾 Guardar Producto", type="primary")
-            
+
             if guardar_producto:
-                if codigo_principal and descripcion and precio_unitario > 0:
+                # Validación final antes de enviar
+                # Validaciones
+                errores = []
+
+                if not codigo_principal:
+                    errores.append("El código principal es obligatorio")
+                elif len(codigo_principal) > 25:
+                    errores.append("El código principal no puede tener más de 25 caracteres")
+
+                if not descripcion:
+                    errores.append("La descripción es obligatoria")
+                elif len(descripcion) > 300:
+                    errores.append("La descripción no puede tener más de 300 caracteres")
+
+                if precio_unitario <= 0:
+                    errores.append("El precio unitario debe ser mayor a 0")
+
+                if porcentaje_iva < 0 or porcentaje_iva > 1:
+                    errores.append("El porcentaje de IVA debe estar entre 0 y 1 (0% y 100%)")
+
+                if errores:
+                    for error in errores:
+                        st.error(f"❌ {error}")
+                else:
                     producto_data = {
                         "codigo_principal": codigo_principal,
                         "codigo_auxiliar": codigo_auxiliar,
@@ -462,17 +565,15 @@ def productos_page():
                         "porcentaje_iva": porcentaje_iva,
                         "activo": activo
                     }
-                    
+
                     resultado = api_client.post("/productos", producto_data)
                     if resultado:
                         show_message("data_saved", f"Producto creado: {descripcion}")
                         st.rerun()
-                else:
-                    show_message("error", "Complete todos los campos obligatorios (*)")
-    
+
     with tab3:
         st.subheader("📊 Estadísticas de Productos")
-        
+
         stats = api_client.get("/productos/estadisticas")
         if stats:
             # Distribución por tipo
@@ -571,18 +672,34 @@ def configuracion_page():
             with col2:
                 telefono = st.text_input("Teléfono", value=config_empresa.get("telefono", "") if config_empresa else "")
                 email = st.text_input("Email", value=config_empresa.get("email", "") if config_empresa else "")
+                # Validación de email en tiempo real
+                if email and not DataValidator.validate_email(email):
+                    st.error("❌ Email inválido")
                 ambiente = st.selectbox("Ambiente SRI", ["1", "2"], index=0 if not config_empresa else int(config_empresa.get("ambiente", "1")) - 1)
                 obligado_contabilidad = st.selectbox("Obligado Contabilidad", ["SI", "NO"], index=0 if not config_empresa else 0 if config_empresa.get("obligado_contabilidad") == "SI" else 1)
-            
+
             # Validaciones
-            if ruc and not DataValidator.validate_ruc(ruc):
+            # Validar RUC usando el validador general de identificaciones (tipo "04" -> RUC)
+            if ruc and not DataValidator.validate_identification("04", ruc):
                 st.error("❌ RUC inválido")
-            
+                ruc_valid = False
+            else:
+                ruc_valid = True
+
             if email and not DataValidator.validate_email(email):
                 st.error("❌ Email inválido")
-            
+                email_valid = False
+            else:
+                email_valid = True
+
             if st.form_submit_button("💾 Guardar Configuración", type="primary"):
-                if ruc and razon_social and direccion:
+                if not (ruc and razon_social and direccion):
+                    show_message("error", "Por favor complete los campos obligatorios (RUC, Razón Social, Dirección).")
+                elif ruc and not DataValidator.validate_identification("04", ruc):
+                    show_message("error", "RUC inválido")
+                elif email and not DataValidator.validate_email(email):
+                    show_message("error", "Email inválido")
+                else:
                     empresa_data = {
                         "ruc": ruc,
                         "razon_social": razon_social,
@@ -593,13 +710,11 @@ def configuracion_page():
                         "ambiente": ambiente,
                         "obligado_contabilidad": obligado_contabilidad
                     }
-                    
+
                     resultado = api_client.post("/configuracion/empresa", empresa_data)
                     if resultado:
                         show_message("data_saved", "Configuración de empresa guardada")
-                else:
-                    show_message("error", "Complete todos los campos obligatorios (*)")
-    
+
     with tab2:
         st.subheader("🔐 Certificados Digitales")
         

@@ -4,11 +4,8 @@ Utilidades y componentes reutilizables para el frontend
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, date
 from typing import Dict, List, Optional
-import base64
-from io import BytesIO
 
 def format_currency(amount: float) -> str:
     """Formatear cantidad como moneda"""
@@ -114,29 +111,63 @@ def create_pie_chart(data: List[Dict], values_col: str, names_col: str, title: s
 
 def validate_ruc(ruc: str) -> bool:
     """Validar RUC ecuatoriano"""
-    if not ruc or len(ruc) != 13:
+    if not ruc or len(ruc) != 13 or not ruc.isdigit():
         return False
-    
+
     # Algoritmo de validación de RUC
     try:
         # Los primeros dos dígitos deben ser válidos (01-24)
         provincia = int(ruc[:2])
         if provincia < 1 or provincia > 24:
             return False
-        
+
         # Tercer dígito debe ser menor a 6 para personas naturales
         # o 6 para sociedades privadas, 9 para sociedades públicas
         tercer_digito = int(ruc[2])
-        if tercer_digito < 0 or tercer_digito > 9:
+        if tercer_digito not in [0, 1, 2, 3, 4, 5, 6, 9]:
             return False
-        
-        return True
-    except ValueError:
+
+        # Validar los primeros 9 dígitos con el dígito verificador
+        coeficientes = [2, 1, 2, 1, 2, 1, 2, 1, 2]
+        suma = 0
+
+        for i in range(9):
+            valor = int(ruc[i]) * coeficientes[i]
+            if valor >= 10:
+                valor = valor - 9
+            suma += valor
+
+        digito_verificador = (10 - (suma % 10)) % 10
+        return digito_verificador == int(ruc[9])
+
+    except (ValueError, IndexError):
         return False
 
 def validate_cedula(cedula: str) -> bool:
     """Validar cédula ecuatoriana"""
-    if not cedula or len(cedula) != 10:
+    if not cedula or len(cedula) != 10 or not cedula.isdigit():
+        return False
+
+    try:
+        # Algoritmo de validación de cédula
+        provincia = int(cedula[:2])
+        if provincia < 1 or provincia > 24:
+            return False
+
+        # Algoritmo módulo 10
+        coeficientes = [2, 1, 2, 1, 2, 1, 2, 1, 2]
+        suma = 0
+
+        for i in range(9):
+            valor = int(cedula[i]) * coeficientes[i]
+            if valor >= 10:
+                valor = valor - 9
+            suma += valor
+
+        digito_verificador = (10 - (suma % 10)) % 10
+        return digito_verificador == int(cedula[9])
+
+    except (ValueError, IndexError):
         return False
     
     try:
@@ -175,8 +206,6 @@ def show_error_message(message: str):
 
 def show_warning_message(message: str):
     """Mostrar mensaje de advertencia"""
-    st.warning(f"⚠️ {message}")
-
 def show_info_message(message: str):
     """Mostrar mensaje informativo"""
     st.info(f"ℹ️ {message}")
@@ -195,11 +224,11 @@ def format_identification(tipo: str, identificacion: str) -> str:
     tipos = {
         "04": "RUC",
         "05": "Cédula",
-        "06": "Pasaporte", 
+        "06": "Pasaporte",
         "07": "Consumidor Final",
         "08": "Identificación Exterior"
     }
-    
+
     tipo_desc = tipos.get(tipo, "Desconocido")
     return f"{tipo_desc}: {identificacion}"
 
@@ -208,6 +237,53 @@ def create_confirmation_dialog(message: str, key: str) -> bool:
     if st.button(f"⚠️ {message}", key=key):
         return st.checkbox("Confirmar acción", key=f"{key}_confirm")
     return False
+
+class DataValidator:
+    """Validador de datos"""
+
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        """Validar email"""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
+
+    @staticmethod
+    def validate_phone(phone: str) -> bool:
+        """Validar teléfono"""
+        import re
+        # Formato ecuatoriano: 02-1234567 o 09-12345678
+        pattern = r'^0[2-9]-?\d{7,8}$'
+        return re.match(pattern, phone.replace(' ', '')) is not None
+
+    @staticmethod
+    def validate_required_fields(data: Dict, required_fields: List[str]) -> List[str]:
+        """Validar campos requeridos"""
+        missing_fields = []
+        for field in required_fields:
+            if not data.get(field) or str(data.get(field)).strip() == "":
+                missing_fields.append(field)
+        return missing_fields
+
+    @staticmethod
+    def validate_positive_amount(amount: float) -> bool:
+        """Validar que el monto sea positivo"""
+        return isinstance(amount, (int, float)) and amount > 0
+
+    @staticmethod
+    def validate_identification(tipo_id: str, identificacion: str) -> bool:
+        """Validar identificación según tipo"""
+        if not identificacion:
+            return False
+
+        if tipo_id == "05":  # Cédula
+            return validate_cedula(identificacion)
+        elif tipo_id == "04":  # RUC
+            return validate_ruc(identificacion)
+        elif tipo_id in ["06", "07", "08"]:  # Otros tipos
+            return len(identificacion) > 0 and len(identificacion) <= 20
+        else:
+            return False
 
 class DataValidator:
     """Validador de datos"""
