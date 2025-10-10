@@ -7,15 +7,35 @@ import plotly.express as px
 from datetime import datetime, date
 from typing import Dict, List, Optional
 
-def format_currency(amount: float) -> str:
+def format_currency(amount) -> str:
     """Formatear cantidad como moneda"""
-    return f"${amount:,.2f}"
+    try:
+        # Convertir a float si es string o Decimal
+        if isinstance(amount, str):
+            amount = float(amount)
+        elif not isinstance(amount, (int, float)):
+            amount = float(amount)
+        return f"${amount:,.2f}"
+    except (ValueError, TypeError):
+        return "$0.00"
 
 def format_date(date_obj) -> str:
     """Formatear fecha"""
     if isinstance(date_obj, str):
         return date_obj
     return date_obj.strftime("%d/%m/%Y")
+
+def format_percentage(value) -> str:
+    """Formatear valor como porcentaje"""
+    try:
+        # Convertir a float si es string o Decimal
+        if isinstance(value, str):
+            value = float(value)
+        elif not isinstance(value, (int, float)):
+            value = float(value)
+        return f"{value * 100:.1f}%"
+    except (ValueError, TypeError):
+        return "0.0%"
 
 def create_metric_card(title: str, value: str, delta: Optional[str] = None, delta_color: str = "normal"):
     """Crear tarjeta de métrica personalizada"""
@@ -330,26 +350,34 @@ def create_export_options():
         if st.button("📧 Enviar por Email"):
             st.info("Funcionalidad en desarrollo")
 
-def create_search_filter(placeholder: str = "Buscar...") -> str:
+def create_search_filter(placeholder: str = "Buscar...", key: str = None) -> str:
     """Crear filtro de búsqueda"""
-    return st.text_input("🔍", placeholder=placeholder)
+    return st.text_input("🔍", placeholder=placeholder, key=key)
 
-def create_date_range_filter():
+def create_date_range_filter(key_prefix: str = "default"):
     """Crear filtro de rango de fechas"""
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        fecha_desde = st.date_input("📅 Desde", value=date.today().replace(day=1))
-    
+        fecha_desde = st.date_input(
+            "📅 Desde",
+            value=date.today().replace(day=1),
+            key=f"{key_prefix}_fecha_desde"
+        )
+
     with col2:
-        fecha_hasta = st.date_input("📅 Hasta", value=date.today())
-    
+        fecha_hasta = st.date_input(
+            "📅 Hasta",
+            value=date.today(),
+            key=f"{key_prefix}_fecha_hasta"
+        )
+
     return fecha_desde, fecha_hasta
 
-def create_status_filter(statuses: List[str], default: str = "Todos"):
+def create_status_filter(statuses: List[str], default: str = "Todos", key: str = None):
     """Crear filtro de estado"""
     options = [default] + statuses
-    return st.selectbox("🏷️ Estado", options)
+    return st.selectbox("🏷️ Estado", options, key=key)
 
 def display_summary_stats(stats: Dict):
     """Mostrar estadísticas resumidas"""

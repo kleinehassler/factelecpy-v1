@@ -32,6 +32,11 @@ MANIFEST
 *.manifest
 *.spec
 
+
+*.md
+.claude
+.claude/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

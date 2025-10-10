@@ -4,6 +4,7 @@ Cliente para comunicación con los servicios web del SRI Ecuador
 import requests
 import base64
 import logging
+from typing import Dict, Any
 from config.settings import settings
 
 logger = logging.getLogger(__name__)

@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 import os
 from xml.dom import minidom
+import html
 
 from config.settings import settings
 from backend.models import Factura, FacturaDetalle, Cliente, Empresa
@@ -15,10 +16,28 @@ from backend.models import Factura, FacturaDetalle, Cliente, Empresa
 
 class XMLGenerator:
     """Generador de XML para documentos electrónicos del SRI"""
-    
+
     def __init__(self):
         self.namespace = ""
         self.version = "2.0.0"
+
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        """
+        Sanitizar texto para XML (escapar caracteres especiales)
+
+        Args:
+            text: Texto a sanitizar
+
+        Returns:
+            str: Texto sanitizado para XML
+        """
+        if not text:
+            return text
+
+        # Escapar caracteres especiales XML usando html.escape
+        # que maneja &, <, >, y opcionalmente " y '
+        return html.escape(str(text), quote=True)
     
     def generar_xml_factura(self, factura: Factura, empresa: Empresa, cliente: Cliente, 
                            detalles: List[FacturaDetalle]) -> str:
@@ -62,48 +81,48 @@ class XMLGenerator:
     def _crear_info_tributaria(self, factura: Factura, empresa: Empresa) -> ET.Element:
         """Crear sección de información tributaria"""
         info_trib = ET.Element("infoTributaria")
-        
+
         ET.SubElement(info_trib, "ambiente").text = factura.ambiente
         ET.SubElement(info_trib, "tipoEmision").text = factura.tipo_emision
-        ET.SubElement(info_trib, "razonSocial").text = empresa.razon_social
-        
+        ET.SubElement(info_trib, "razonSocial").text = self._sanitize_text(empresa.razon_social)
+
         if empresa.nombre_comercial:
-            ET.SubElement(info_trib, "nombreComercial").text = empresa.nombre_comercial
-        
+            ET.SubElement(info_trib, "nombreComercial").text = self._sanitize_text(empresa.nombre_comercial)
+
         ET.SubElement(info_trib, "ruc").text = empresa.ruc
         ET.SubElement(info_trib, "claveAcceso").text = factura.clave_acceso
         ET.SubElement(info_trib, "codDoc").text = factura.tipo_comprobante
-        
+
         # Extraer establecimiento y punto emisión del número de comprobante
         # Formato: XXX-XXX-XXXXXXXXX
         partes = factura.numero_comprobante.split('-')
         ET.SubElement(info_trib, "estab").text = partes[0]
         ET.SubElement(info_trib, "ptoEmi").text = partes[1]
         ET.SubElement(info_trib, "secuencial").text = partes[2]
-        
-        ET.SubElement(info_trib, "dirMatriz").text = empresa.direccion_matriz
-        
+
+        ET.SubElement(info_trib, "dirMatriz").text = self._sanitize_text(empresa.direccion_matriz)
+
         # Contribuyente especial (opcional)
         if empresa.contribuyente_especial:
             ET.SubElement(info_trib, "contribuyenteEspecial").text = empresa.contribuyente_especial
-        
+
         return info_trib
     
     def _crear_info_factura(self, factura: Factura, cliente: Cliente) -> ET.Element:
         """Crear sección de información de la factura"""
         info_fact = ET.Element("infoFactura")
-        
+
         # Fecha en formato dd/mm/yyyy
         fecha_str = factura.fecha_emision.strftime("%d/%m/%Y")
         ET.SubElement(info_fact, "fechaEmision").text = fecha_str
-        
-        # Datos del cliente
+
+        # Datos del cliente (sanitizados)
         ET.SubElement(info_fact, "tipoIdentificacionComprador").text = cliente.tipo_identificacion
-        ET.SubElement(info_fact, "razonSocialComprador").text = cliente.razon_social
+        ET.SubElement(info_fact, "razonSocialComprador").text = self._sanitize_text(cliente.razon_social)
         ET.SubElement(info_fact, "identificacionComprador").text = cliente.identificacion
-        
+
         if cliente.direccion:
-            ET.SubElement(info_fact, "direccionComprador").text = cliente.direccion
+            ET.SubElement(info_fact, "direccionComprador").text = self._sanitize_text(cliente.direccion)
         
         # Obligado a llevar contabilidad
         empresa = factura.empresa
@@ -132,7 +151,7 @@ class XMLGenerator:
     def _crear_total_con_impuestos(self, factura: Factura) -> ET.Element:
         """Crear sección de total con impuestos"""
         total_con_impuestos = ET.Element("totalConImpuestos")
-        
+
         # IVA 0%
         if factura.subtotal_0 > 0:
             total_impuesto = ET.SubElement(total_con_impuestos, "totalImpuesto")
@@ -141,8 +160,17 @@ class XMLGenerator:
             ET.SubElement(total_impuesto, "baseImponible").text = str(factura.subtotal_0)
             ET.SubElement(total_impuesto, "tarifa").text = "0"
             ET.SubElement(total_impuesto, "valor").text = "0.00"
-        
-        # IVA 12%
+
+        # IVA 8% (zonas especiales)
+        if hasattr(factura, 'subtotal_8') and factura.subtotal_8 > 0:
+            total_impuesto = ET.SubElement(total_con_impuestos, "totalImpuesto")
+            ET.SubElement(total_impuesto, "codigo").text = "2"
+            ET.SubElement(total_impuesto, "codigoPorcentaje").text = "3"
+            ET.SubElement(total_impuesto, "baseImponible").text = str(factura.subtotal_8)
+            ET.SubElement(total_impuesto, "tarifa").text = "0.08"
+            ET.SubElement(total_impuesto, "valor").text = str(factura.iva_8)
+
+        # IVA 12% (para facturas históricas)
         if factura.subtotal_12 > 0:
             total_impuesto = ET.SubElement(total_con_impuestos, "totalImpuesto")
             ET.SubElement(total_impuesto, "codigo").text = "2"
@@ -150,6 +178,15 @@ class XMLGenerator:
             ET.SubElement(total_impuesto, "baseImponible").text = str(factura.subtotal_12)
             ET.SubElement(total_impuesto, "tarifa").text = "0.12"
             ET.SubElement(total_impuesto, "valor").text = str(factura.iva_12)
+
+        # IVA 15% (tarifa actual 2024)
+        if hasattr(factura, 'subtotal_15') and factura.subtotal_15 > 0:
+            total_impuesto = ET.SubElement(total_con_impuestos, "totalImpuesto")
+            ET.SubElement(total_impuesto, "codigo").text = "2"
+            ET.SubElement(total_impuesto, "codigoPorcentaje").text = "4"
+            ET.SubElement(total_impuesto, "baseImponible").text = str(factura.subtotal_15)
+            ET.SubElement(total_impuesto, "tarifa").text = "0.15"
+            ET.SubElement(total_impuesto, "valor").text = str(factura.iva_15)
         
         # No objeto de IVA
         if factura.subtotal_no_objeto_iva > 0:
@@ -179,16 +216,16 @@ class XMLGenerator:
     def _crear_detalles(self, detalles: List[FacturaDetalle]) -> ET.Element:
         """Crear sección de detalles de la factura"""
         detalles_elem = ET.Element("detalles")
-        
+
         for detalle in detalles:
             detalle_elem = ET.SubElement(detalles_elem, "detalle")
-            
-            ET.SubElement(detalle_elem, "codigoPrincipal").text = detalle.codigo_principal
-            
+
+            ET.SubElement(detalle_elem, "codigoPrincipal").text = self._sanitize_text(detalle.codigo_principal)
+
             if detalle.codigo_auxiliar:
-                ET.SubElement(detalle_elem, "codigoAuxiliar").text = detalle.codigo_auxiliar
-            
-            ET.SubElement(detalle_elem, "descripcion").text = detalle.descripcion
+                ET.SubElement(detalle_elem, "codigoAuxiliar").text = self._sanitize_text(detalle.codigo_auxiliar)
+
+            ET.SubElement(detalle_elem, "descripcion").text = self._sanitize_text(detalle.descripcion)
             ET.SubElement(detalle_elem, "cantidad").text = str(detalle.cantidad)
             ET.SubElement(detalle_elem, "precioUnitario").text = str(detalle.precio_unitario)
             ET.SubElement(detalle_elem, "descuento").text = str(detalle.descuento)
@@ -219,12 +256,12 @@ class XMLGenerator:
     def _crear_info_adicional(self, info_adicional: List) -> ET.Element:
         """Crear sección de información adicional"""
         info_adic_elem = ET.Element("infoAdicional")
-        
+
         for info in info_adicional:
             campo = ET.SubElement(info_adic_elem, "campoAdicional")
-            campo.set("nombre", info.nombre)
-            campo.text = info.valor
-        
+            campo.set("nombre", self._sanitize_text(info.nombre))
+            campo.text = self._sanitize_text(info.valor)
+
         return info_adic_elem
     
     def _formatear_xml(self, element: ET.Element) -> str:
@@ -299,7 +336,7 @@ class ClaveAccesoGenerator:
     @staticmethod
     def generar_clave_acceso(fecha_emision: datetime, tipo_comprobante: str,
                            ruc: str, ambiente: str, serie: str, numero: str,
-                           codigo_numerico: str = "12345678", tipo_emision: str = "1") -> str:
+                           codigo_numerico: str = None, tipo_emision: str = "1") -> str:
         """
         Genera la clave de acceso de 49 dígitos según algoritmo del SRI
         
@@ -318,6 +355,11 @@ class ClaveAccesoGenerator:
         Returns:
             str: Clave de acceso de 49 dígitos
         """
+        # Generar código numérico aleatorio si no se proporciona
+        import random
+        if codigo_numerico is None:
+            codigo_numerico = str(random.randint(10000000, 99999999))
+
         # Fecha: ddmmaaaa
         fecha_str = fecha_emision.strftime("%d%m%Y")
         

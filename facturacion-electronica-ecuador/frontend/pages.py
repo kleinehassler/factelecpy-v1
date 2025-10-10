@@ -6,6 +6,23 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict
 
+# Importar funciones de utilidades (importación relativa)
+from utils import (
+    format_currency,
+    create_status_badge,
+    create_search_filter,
+    create_date_range_filter,
+    create_status_filter,
+    display_summary_stats,
+    create_sales_chart,
+    create_pie_chart,
+    validate_ruc,
+    validate_cedula,
+    show_success_message,
+    show_error_message,
+    DataValidator
+)
+
 class FacturasPage:
     """Página de gestión de facturas"""
     
@@ -45,15 +62,15 @@ class FacturasPage:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            search_term = create_search_filter("Buscar por número o cliente...")
-        
+            search_term = create_search_filter("Buscar por número o cliente...", key="search_facturas_list")
+
         with col2:
-            fecha_desde, fecha_hasta = create_date_range_filter()
-        
+            fecha_desde, fecha_hasta = create_date_range_filter(key_prefix="facturas_list")
+
         with col3:
             estado_filter = create_status_filter([
                 "GENERADO", "FIRMADO", "AUTORIZADO", "RECHAZADO", "DEVUELTO"
-            ])
+            ], key="status_facturas_list")
         
         with col4:
             limit = st.selectbox("Mostrar", [10, 25, 50, 100], index=1)
@@ -212,117 +229,257 @@ class FacturasPage:
         # Inicializar estado de sesión para detalles
         if 'factura_detalles' not in st.session_state:
             st.session_state.factura_detalles = []
+        if 'editing_item_index' not in st.session_state:
+            st.session_state.editing_item_index = None
 
-        with st.form("nueva_factura_form"):
-            # Sección 1: Datos del cliente
-            st.markdown("#### 👤 Datos del Cliente")
+        # Mostrar fecha de emisión prominentemente
+        col_fecha1, col_fecha2, col_fecha3 = st.columns([1, 2, 1])
+        with col_fecha2:
+            st.markdown("### 📅 Fecha de Emisión")
+            fecha_emision = st.date_input(
+                "Fecha",
+                value=datetime.now().date(),
+                key="fecha_emision_factura"
+            )
+            hora_emision = st.time_input(
+                "Hora",
+                value=datetime.now().time(),
+                key="hora_emision_factura"
+            )
+            st.info(f"📆 Se emitirá el: {fecha_emision.strftime('%d/%m/%Y')} a las {hora_emision.strftime('%H:%M')}")
 
-            col1, col2 = st.columns(2)
+        st.markdown("---")
 
-            with col1:
-                # Selección de cliente existente o nuevo
-                cliente_option = st.radio(
-                    "Tipo de cliente:",
-                    ["Seleccionar existente", "Crear nuevo"]
-                )
+        # Sección 1: Datos del cliente
+        st.markdown("#### 👤 Datos del Cliente")
 
-                if cliente_option == "Seleccionar existente":
-                    clientes = self.api_client.get("/clientes/")
-                    if clientes:
-                        cliente_options = {
-                            f"{c['razon_social']} - {c['identificacion']}": c['id']
-                            for c in clientes
-                        }
-                        cliente_seleccionado = st.selectbox(
-                            "Cliente",
-                            options=list(cliente_options.keys())
-                        )
-                        cliente_id = cliente_options.get(cliente_seleccionado)
-                    else:
-                        st.warning("No hay clientes registrados")
-                        cliente_id = None
-                else:
-                    cliente_id = None
+        col1, col2 = st.columns(2)
 
-            with col2:
-                if cliente_option == "Crear nuevo":
-                    tipo_id = st.selectbox("Tipo ID", ["05", "04", "06", "07", "08"])
-                    identificacion = st.text_input("Identificación")
-                    razon_social = st.text_input("Razón Social")
-                    email = st.text_input("Email")
+        with col1:
+            # Selección de cliente existente o nuevo
+            cliente_option = st.radio(
+                "Tipo de cliente:",
+                ["Seleccionar existente", "Crear nuevo"],
+                key="cliente_option_radio"
+            )
 
-                    # Validaciones en tiempo real
-                    if identificacion:
-                        if tipo_id == "05" and not DataValidator.validate_identification("05", identificacion):
-                            st.error("❌ Cédula inválida")
-                        elif tipo_id == "04" and not DataValidator.validate_identification("04", identificacion):
-                            st.error("❌ RUC inválido")
-
-                    if email and not DataValidator.validate_email(email):
-                        st.error("❌ Email inválido")
-            
-            # Agregar producto
-            col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
-            
-            with col1:
-                productos = self.api_client.get("/productos/")
-                if productos:
-                    producto_options = {
-                        f"{p['descripcion']} - {format_currency(p['precio_unitario'])}": p 
-                        for p in productos
+            if cliente_option == "Seleccionar existente":
+                clientes = self.api_client.get("/clientes/")
+                if clientes:
+                    cliente_options = {
+                        f"{c['razon_social']} - {c['identificacion']}": c['id']
+                        for c in clientes
                     }
-                    producto_sel = st.selectbox("Producto", options=list(producto_options.keys()))
+                    cliente_seleccionado = st.selectbox(
+                        "Cliente",
+                        options=list(cliente_options.keys()),
+                        key="cliente_seleccionado_select"
+                    )
+                    cliente_id = cliente_options.get(cliente_seleccionado)
                 else:
-                    st.warning("No hay productos registrados")
-                    producto_sel = None
+                    st.warning("No hay clientes registrados")
+                    cliente_id = None
+            else:
+                cliente_id = None
+
+        with col2:
+            if cliente_option == "Crear nuevo":
+                tipo_id = st.selectbox("Tipo ID", ["05", "04", "06", "07", "08"], key="tipo_id_nuevo_cliente")
+                identificacion = st.text_input("Identificación", key="identificacion_nuevo_cliente")
+                razon_social = st.text_input("Razón Social", key="razon_social_nuevo_cliente")
+                email = st.text_input("Email", key="email_nuevo_cliente")
+
+                # Validaciones en tiempo real
+                if identificacion:
+                    if tipo_id == "05" and not DataValidator.validate_identification("05", identificacion):
+                        st.error("❌ Cédula inválida")
+                    elif tipo_id == "04" and not DataValidator.validate_identification("04", identificacion):
+                        st.error("❌ RUC inválido")
+
+                if email and not DataValidator.validate_email(email):
+                    st.error("❌ Email inválido")
+
+        st.markdown("---")
+
+        # Sección 2: Agregar productos
+        st.markdown("#### 🛒 Agregar Productos")
+
+        col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+
+        with col1:
+            productos = self.api_client.get("/productos/")
+            if productos:
+                producto_options = {
+                    f"{p['descripcion']} - {format_currency(p['precio_unitario'])}": p
+                    for p in productos
+                }
+                producto_sel = st.selectbox(
+                    "Producto",
+                    options=list(producto_options.keys()),
+                    key="producto_select_nuevo"
+                )
+            else:
+                st.warning("No hay productos registrados")
+                producto_sel = None
+
+        with col2:
+            cantidad = st.number_input("Cantidad", min_value=0.01, value=1.0, step=0.01, key="cantidad_input")
+
+        with col3:
+            precio_unit = st.number_input("Precio Unit.", min_value=0.01, value=1.0, step=0.01, key="precio_unit_input")
+
+        with col4:
+            descuento = st.number_input("Desc. %", min_value=0.0, max_value=100.0, value=0.0, key="descuento_input")
+
+        with col5:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("➕ Agregar", key="agregar_producto_btn", use_container_width=True):
+                if producto_sel:
+                    producto = producto_options[producto_sel]
+                    # Convertir descuento de porcentaje a valor en dólares
+                    subtotal_item = cantidad * precio_unit
+                    descuento_dolares = (descuento / 100.0) * subtotal_item if descuento > 0 else 0.0
+
+                    detalle = {
+                        "codigo_principal": producto['codigo_principal'],
+                        "codigo_auxiliar": producto.get('codigo_auxiliar'),
+                        "descripcion": producto['descripcion'],
+                        "cantidad": cantidad,
+                        "precio_unitario": precio_unit,
+                        "descuento": descuento_dolares,
+                        "descuento_porcentaje": descuento  # Guardar también el porcentaje para mostrar
+                    }
+                    st.session_state.factura_detalles.append(detalle)
+                    st.rerun()
+
+        st.markdown("---")
+
+        # Sección 3: Mostrar items agregados
+        if st.session_state.factura_detalles:
+            st.markdown("#### 📦 Items Agregados")
+
+            # Crear tabla con los items
+            for idx, detalle in enumerate(st.session_state.factura_detalles):
+                with st.container():
+                    col1, col2, col3, col4, col5, col6, col7 = st.columns([3, 1, 1.2, 1, 1.2, 0.8, 0.8])
+
+                    with col1:
+                        st.text(detalle['descripcion'])
+
+                    with col2:
+                        st.text(f"Cant: {detalle['cantidad']}")
+
+                    with col3:
+                        st.text(f"P.Unit: {format_currency(detalle['precio_unitario'])}")
+
+                    with col4:
+                        descuento_pct = detalle.get('descuento_porcentaje', 0)
+                        st.text(f"Desc: {descuento_pct:.1f}%")
+
+                    with col5:
+                        subtotal = (detalle['cantidad'] * detalle['precio_unitario']) - detalle['descuento']
+                        st.text(f"Total: {format_currency(subtotal)}")
+
+                    with col6:
+                        if st.button("✏️", key=f"edit_{idx}", help="Editar item"):
+                            st.session_state.editing_item_index = idx
+                            st.rerun()
+
+                    with col7:
+                        if st.button("🗑️", key=f"delete_{idx}", help="Eliminar item"):
+                            st.session_state.factura_detalles.pop(idx)
+                            st.rerun()
+
+                    st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
+
+            # Mostrar totales
+            st.markdown("---")
+            col1, col2, col3 = st.columns([2, 1, 1])
 
             with col2:
-                cantidad = st.number_input("Cantidad", min_value=0.01, value=1.0, step=0.01)
-                # Validar cantidad positiva
-                if cantidad <= 0:
-                    st.error("❌ La cantidad debe ser mayor a 0")
-
+                st.markdown("**Subtotal sin impuestos:**")
             with col3:
-                precio_unit = st.number_input("Precio Unit.", min_value=0.01, value=1.0, step=0.01)
-                # Validar precio positivo
-                if precio_unit <= 0:
-                    st.error("❌ El precio unitario debe ser mayor a 0")
+                subtotal_total = sum(
+                    (d['cantidad'] * d['precio_unitario']) - d['descuento']
+                    for d in st.session_state.factura_detalles
+                )
+                st.markdown(f"**{format_currency(subtotal_total)}**")
+        else:
+            st.info("ℹ️ No hay items agregados. Agregue productos para crear la factura.")
 
-            with col4:
-                descuento = st.number_input("Desc. %", min_value=0.0, max_value=100.0, value=0.0)
-                # Validar rango de descuento
-                if descuento < 0 or descuento > 100:
-                    st.error("❌ El descuento debe estar entre 0 y 100%")
-            
-            with col5:
-                agregar_producto = st.form_submit_button("➕ Agregar")
-            
-            # Procesar agregar producto
-            if agregar_producto and producto_sel:
-                producto = producto_options[producto_sel]
-                detalle = {
-                    "codigo_principal": producto['codigo_principal'],
-                    "codigo_auxiliar": producto.get('codigo_auxiliar'),
-                    "descripcion": producto['descripcion'],
-                    "cantidad": cantidad,
-                    "precio_unitario": precio_unit,
-                    "descuento": descuento
-                }
-                st.session_state.factura_detalles.append(detalle)
-                st.rerun()
+        # Modal de edición (si hay un item siendo editado)
+        if st.session_state.editing_item_index is not None:
+            idx = st.session_state.editing_item_index
+            if idx < len(st.session_state.factura_detalles):
+                detalle_edit = st.session_state.factura_detalles[idx]
 
-            st.markdown("---")
+                st.markdown("---")
+                st.markdown(f"### ✏️ Editando: {detalle_edit['descripcion']}")
 
-            # Sección 3: Información adicional
-            st.markdown("#### 📝 Información Adicional")
-            observaciones = st.text_area("Observaciones")
+                col1, col2, col3, col4 = st.columns(4)
 
-            # Botón crear factura (botón principal del formulario)
-            crear_factura = st.form_submit_button("💾 Crear Factura", type="primary")
+                with col1:
+                    nueva_cantidad = st.number_input(
+                        "Cantidad",
+                        min_value=0.01,
+                        value=float(detalle_edit['cantidad']),
+                        step=0.01,
+                        key=f"edit_cantidad_{idx}"
+                    )
 
-            if crear_factura:
+                with col2:
+                    nuevo_precio = st.number_input(
+                        "Precio Unitario",
+                        min_value=0.01,
+                        value=float(detalle_edit['precio_unitario']),
+                        step=0.01,
+                        key=f"edit_precio_{idx}"
+                    )
+
+                with col3:
+                    nuevo_descuento_pct = st.number_input(
+                        "Descuento %",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=float(detalle_edit.get('descuento_porcentaje', 0)),
+                        key=f"edit_descuento_{idx}"
+                    )
+
+                with col4:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button("💾 Guardar", key=f"save_edit_{idx}", use_container_width=True):
+                            # Actualizar el detalle
+                            subtotal_item = nueva_cantidad * nuevo_precio
+                            nuevo_descuento_dolares = (nuevo_descuento_pct / 100.0) * subtotal_item if nuevo_descuento_pct > 0 else 0.0
+
+                            st.session_state.factura_detalles[idx]['cantidad'] = nueva_cantidad
+                            st.session_state.factura_detalles[idx]['precio_unitario'] = nuevo_precio
+                            st.session_state.factura_detalles[idx]['descuento'] = nuevo_descuento_dolares
+                            st.session_state.factura_detalles[idx]['descuento_porcentaje'] = nuevo_descuento_pct
+                            st.session_state.editing_item_index = None
+                            st.rerun()
+
+                    with col_b:
+                        if st.button("❌ Cancelar", key=f"cancel_edit_{idx}", use_container_width=True):
+                            st.session_state.editing_item_index = None
+                            st.rerun()
+
+        st.markdown("---")
+
+        # Sección 4: Información adicional
+        st.markdown("#### 📝 Información Adicional")
+        observaciones = st.text_area("Observaciones", key="observaciones_textarea")
+
+        # Botón crear factura
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("💾 Crear Factura", type="primary", use_container_width=True, key="crear_factura_btn"):
                 if self._validar_factura(cliente_id, cliente_option):
-                    self._crear_factura(cliente_id, cliente_option, observaciones)
+                    # Combinar fecha y hora
+                    fecha_hora_emision = datetime.combine(fecha_emision, hora_emision)
+                    self._crear_factura(cliente_id, cliente_option, observaciones, fecha_hora_emision)
             
     def _validar_factura(self, cliente_id, cliente_option):
         """Validar datos de la factura"""
@@ -337,10 +494,10 @@ class FacturasPage:
         # Validar cliente nuevo si es necesario
         if cliente_option == "Crear nuevo":
             # Tomar valores desde la sesión, usando strings vacíos por defecto
-            tipo_id = st.session_state.get("tipo_id", "")
-            identificacion = st.session_state.get("identificacion", "")
-            razon_social = st.session_state.get("razon_social", "")
-            email = st.session_state.get("email", "")
+            tipo_id = st.session_state.get("tipo_id_nuevo_cliente", "")
+            identificacion = st.session_state.get("identificacion_nuevo_cliente", "")
+            razon_social = st.session_state.get("razon_social_nuevo_cliente", "")
+            email = st.session_state.get("email_nuevo_cliente", "")
 
             if not identificacion or not razon_social:
                 show_error_message("Debe completar los datos del cliente")
@@ -380,35 +537,48 @@ class FacturasPage:
                 show_error_message("El precio unitario de todos los productos debe ser mayor a 0")
                 return False
 
-            if detalle.get("descuento", 0) < 0 or detalle.get("descuento", 0) > 100:
-                show_error_message("El descuento debe estar entre 0 y 100%")
+            # Validar descuento en dólares (no puede ser negativo ni mayor que el subtotal)
+            descuento_dolares = detalle.get("descuento", 0)
+            subtotal_item = detalle.get("cantidad", 0) * detalle.get("precio_unitario", 0)
+            if descuento_dolares < 0 or descuento_dolares > subtotal_item:
+                show_error_message("El descuento no puede ser negativo ni mayor al subtotal del item")
                 return False
         return True
 
-    def _crear_factura(self, cliente_id, cliente_option, observaciones):
+    def _crear_factura(self, cliente_id, cliente_option, observaciones, fecha_hora_emision=None):
         """Crear nueva factura"""
         try:
+            # Usar fecha y hora proporcionada o la actual
+            if fecha_hora_emision is None:
+                fecha_hora_emision = datetime.now()
+
             factura_data = {
                 "cliente_id": cliente_id,
-                "fecha_emision": datetime.now().isoformat(),
+                "fecha_emision": fecha_hora_emision.isoformat(),
                 "detalles": st.session_state.factura_detalles,
                 "observaciones": observaciones
             }
 
             # Si es cliente nuevo, agregarlo a los datos
             if cliente_option == "Crear nuevo":
-                factura_data["cliente_nuevo"] = {
-                    "tipo_identificacion": st.session_state.get("tipo_id"),
-                    "identificacion": st.session_state.get("identificacion"),
-                    "razon_social": st.session_state.get("razon_social"),
-                    "email": st.session_state.get("email")
+                cliente_nuevo_data = {
+                    "tipo_identificacion": st.session_state.get("tipo_id_nuevo_cliente", "05"),
+                    "identificacion": st.session_state.get("identificacion_nuevo_cliente", ""),
+                    "razon_social": st.session_state.get("razon_social_nuevo_cliente", ""),
                 }
+                # Agregar campos opcionales solo si tienen valor
+                email_nuevo = st.session_state.get("email_nuevo_cliente")
+                if email_nuevo:
+                    cliente_nuevo_data["email"] = email_nuevo
+
+                factura_data["cliente_nuevo"] = cliente_nuevo_data
 
             resultado = self.api_client.post("/facturas/", factura_data)
 
             if resultado:
                 show_success_message(f"Factura creada: {resultado['numero_comprobante']}")
                 st.session_state.factura_detalles = []
+                st.session_state.editing_item_index = None
                 st.rerun()
 
         except Exception as e:
@@ -534,35 +704,48 @@ class FacturasPage:
                 show_error_message("El precio unitario de todos los productos debe ser mayor a 0")
                 return False
 
-            if detalle.get("descuento", 0) < 0 or detalle.get("descuento", 0) > 100:
-                show_error_message("El descuento debe estar entre 0 y 100%")
+            # Validar descuento en dólares (no puede ser negativo ni mayor que el subtotal)
+            descuento_dolares = detalle.get("descuento", 0)
+            subtotal_item = detalle.get("cantidad", 0) * detalle.get("precio_unitario", 0)
+            if descuento_dolares < 0 or descuento_dolares > subtotal_item:
+                show_error_message("El descuento no puede ser negativo ni mayor al subtotal del item")
                 return False
         return True
     
-    def _crear_factura(self, cliente_id, cliente_option, observaciones):
+    def _crear_factura(self, cliente_id, cliente_option, observaciones, fecha_hora_emision=None):
         """Crear nueva factura"""
         try:
+            # Usar fecha y hora proporcionada o la actual
+            if fecha_hora_emision is None:
+                fecha_hora_emision = datetime.now()
+
             factura_data = {
                 "cliente_id": cliente_id,
-                "fecha_emision": datetime.now().isoformat(),
+                "fecha_emision": fecha_hora_emision.isoformat(),
                 "detalles": st.session_state.factura_detalles,
                 "observaciones": observaciones
             }
 
             # Si es cliente nuevo, agregarlo a los datos
             if cliente_option == "Crear nuevo":
-                factura_data["cliente_nuevo"] = {
-                    "tipo_identificacion": st.session_state.get("tipo_id"),
-                    "identificacion": st.session_state.get("identificacion"),
-                    "razon_social": st.session_state.get("razon_social"),
-                    "email": st.session_state.get("email")
+                cliente_nuevo_data = {
+                    "tipo_identificacion": st.session_state.get("tipo_id_nuevo_cliente", "05"),
+                    "identificacion": st.session_state.get("identificacion_nuevo_cliente", ""),
+                    "razon_social": st.session_state.get("razon_social_nuevo_cliente", ""),
                 }
+                # Agregar campos opcionales solo si tienen valor
+                email_nuevo = st.session_state.get("email_nuevo_cliente")
+                if email_nuevo:
+                    cliente_nuevo_data["email"] = email_nuevo
+
+                factura_data["cliente_nuevo"] = cliente_nuevo_data
 
             resultado = self.api_client.post("/facturas/", factura_data)
 
             if resultado:
                 show_success_message(f"Factura creada: {resultado['numero_comprobante']}")
                 st.session_state.factura_detalles = []
+                st.session_state.editing_item_index = None
                 st.rerun()
 
         except Exception as e:
@@ -573,7 +756,7 @@ class FacturasPage:
         st.subheader("📊 Estadísticas de Facturación")
         
         # Filtros de fecha
-        fecha_desde, fecha_hasta = create_date_range_filter()
+        fecha_desde, fecha_hasta = create_date_range_filter(key_prefix="facturas_estadisticas")
         
         # Obtener estadísticas
         stats = self.api_client.get(f"/facturas/estadisticas?desde={fecha_desde}&hasta={fecha_hasta}")
@@ -697,13 +880,13 @@ class ClientesPage:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            search_term = create_search_filter("Buscar cliente...")
-        
+            search_term = create_search_filter("Buscar cliente...", key="search_clientes_list")
+
         with col2:
-            tipo_filter = st.selectbox("Tipo ID", ["Todos", "04", "05", "06", "07", "08"])
-        
+            tipo_filter = st.selectbox("Tipo ID", ["Todos", "04", "05", "06", "07", "08"], key="tipo_clientes_list")
+
         with col3:
-            activo_filter = st.selectbox("Estado", ["Todos", "Activo", "Inactivo"])
+            activo_filter = st.selectbox("Estado", ["Todos", "Activo", "Inactivo"], key="estado_clientes_list")
         
         # Obtener clientes
         clientes = self.api_client.get("/clientes/")
@@ -806,19 +989,27 @@ class ClientesPage:
         if not identificacion or not razon_social:
             show_error_message("Identificación y Razón Social son obligatorios")
             return False
-        
+
         if tipo_id == "05" and not validate_cedula(identificacion):
             show_error_message("Cédula inválida")
             return False
-        
+
         if tipo_id == "04" and not validate_ruc(identificacion):
             show_error_message("RUC inválido")
             return False
-        
+
         if email and not DataValidator.validate_email(email):
             show_error_message("Email inválido")
             return False
-        
+
+        # Verificar si el cliente ya existe
+        clientes = self.api_client.get("/clientes/")
+        if clientes:
+            for cliente in clientes:
+                if cliente.get('identificacion') == identificacion:
+                    show_error_message(f"Ya existe un cliente con la identificación {identificacion}")
+                    return False
+
         return True
     
     def _crear_cliente(self, tipo_id, identificacion, razon_social, direccion, telefono, email):
@@ -832,15 +1023,23 @@ class ClientesPage:
                 "telefono": telefono,
                 "email": email
             }
-            
-            resultado = self.api_client.post("/clientes/", cliente_data)
-            
+
+            with st.spinner("Guardando cliente..."):
+                resultado = self.api_client.post("/clientes/", cliente_data)
+
             if resultado:
                 show_success_message(f"Cliente creado exitosamente: {razon_social}")
                 st.rerun()
-        
+            else:
+                show_error_message("No se pudo crear el cliente. Verifique que los datos sean correctos.")
+
         except Exception as e:
-            show_error_message(f"Error al crear cliente: {str(e)}")
+            error_msg = str(e)
+            # Extraer el mensaje de error del JSON si existe
+            if "Cliente con esta identificación ya existe" in error_msg:
+                show_error_message(f"Ya existe un cliente con la identificación {identificacion}")
+            else:
+                show_error_message(f"Error al crear cliente: {error_msg}")
     
     def _render_estadisticas_clientes(self):
         """Renderizar estadísticas de clientes"""

@@ -104,19 +104,20 @@ class EcuadorianValidator:
     
     @staticmethod
     def _validate_ruc_publico(ruc: str) -> bool:
-        """Validar RUC de entidad pública"""
+        """Validar RUC de entidad pública (9 dígitos, incluye dígito verificador)"""
         coeficientes = [3, 2, 7, 6, 5, 4, 3, 2]
         suma = 0
-        
+
+        # Usar 8 coeficientes para los primeros 8 dígitos
         for i in range(8):
             suma += int(ruc[i]) * coeficientes[i]
-        
+
         digito_verificador = 11 - (suma % 11)
         if digito_verificador == 11:
             digito_verificador = 0
         elif digito_verificador == 10:
             digito_verificador = 1
-        
+
         return digito_verificador == int(ruc[8])
     
     @staticmethod
@@ -396,10 +397,10 @@ def validate_and_raise(data: Dict[str, Any], validator_func) -> None:
 def format_validation_errors(errors: List[ValidationError]) -> Dict[str, Any]:
     """
     Formatear errores de validación para respuesta API
-    
+
     Args:
         errors: Lista de errores
-        
+
     Returns:
         Dict: Errores formateados
     """
@@ -414,3 +415,84 @@ def format_validation_errors(errors: List[ValidationError]) -> Dict[str, Any]:
             for error in errors
         ]
     }
+
+
+# Longitudes máximas según especificación SRI
+class SRIFieldLengths:
+    """Longitudes máximas de campos según normativa SRI"""
+    RAZON_SOCIAL = 300
+    NOMBRE_COMERCIAL = 300
+    DIRECCION = 300
+    CODIGO_PRINCIPAL = 25
+    CODIGO_AUXILIAR = 25
+    DESCRIPCION = 300
+    EMAIL = 300
+    TELEFONO = 20
+    OBSERVACIONES = 300
+
+
+def validate_field_length(value: str, field_name: str, max_length: int) -> None:
+    """
+    Validar longitud máxima de un campo
+
+    Args:
+        value: Valor a validar
+        field_name: Nombre del campo
+        max_length: Longitud máxima permitida
+
+    Raises:
+        ValidationError: Si el valor excede la longitud máxima
+    """
+    if value and len(value) > max_length:
+        raise ValidationError(
+            f"{field_name} excede la longitud máxima de {max_length} caracteres (actual: {len(value)})",
+            field_name,
+            "MAX_LENGTH_EXCEEDED"
+        )
+
+
+def sanitize_xml_content(text: str) -> str:
+    """
+    Sanitizar contenido para XML (escapar caracteres especiales)
+
+    Args:
+        text: Texto a sanitizar
+
+    Returns:
+        str: Texto sanitizado
+    """
+    if not text:
+        return text
+
+    # Reemplazar caracteres especiales XML
+    replacements = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&apos;'
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text
+
+
+def validate_and_sanitize_text(text: str, field_name: str, max_length: int) -> str:
+    """
+    Validar longitud y sanitizar texto para uso en XML
+
+    Args:
+        text: Texto a validar y sanitizar
+        field_name: Nombre del campo
+        max_length: Longitud máxima
+
+    Returns:
+        str: Texto sanitizado
+
+    Raises:
+        ValidationError: Si el texto excede la longitud máxima
+    """
+    validate_field_length(text, field_name, max_length)
+    return sanitize_xml_content(text)

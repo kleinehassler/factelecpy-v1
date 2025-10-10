@@ -9,6 +9,7 @@ from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import List
@@ -17,6 +18,8 @@ import base64
 
 from config.settings import settings
 from backend.models import Factura, FacturaDetalle, Cliente, Empresa
+
+logger = logging.getLogger(__name__)
 
 
 class RideGenerator:
@@ -270,7 +273,7 @@ class RideGenerator:
         """Agregar información de autorización"""
         story.append(Paragraph("<b>INFORMACIÓN DE AUTORIZACIÓN</b>", self._get_subtitle_style()))
         story.append(Spacer(1, 6))
-        
+
         if factura.estado_sri == "AUTORIZADO" and factura.numero_autorizacion:
             story.append(Paragraph(f"<b>ESTADO:</b> AUTORIZADO", self._get_normal_style()))
             story.append(Paragraph(f"<b>NÚMERO DE AUTORIZACIÓN:</b> {factura.numero_autorizacion}", self._get_normal_style()))
@@ -279,20 +282,67 @@ class RideGenerator:
         else:
             story.append(Paragraph(f"<b>ESTADO:</b> {factura.estado_sri}", self._get_normal_style()))
             story.append(Paragraph("<b>Nota:</b> Este documento aún no ha sido autorizado por el SRI", self._get_normal_style()))
-        
+
         story.append(Spacer(1, 12))
-        
+
         # Información de obligado a llevar contabilidad
         empresa = factura.empresa
         if empresa.obligado_contabilidad == "SI":
             story.append(Paragraph("<b>CONTRIBUYENTE ESPECIAL:</b> " + (empresa.contribuyente_especial or "NO"), self._get_normal_style()))
             story.append(Paragraph("<b>OBLIGADO A LLEVAR CONTABILIDAD:</b> SI", self._get_normal_style()))
-        
-        story.append(Spacer(1, 20))
-        
+
+        story.append(Spacer(1, 12))
+
+        # Agregar código QR
+        self._agregar_qr_code(story, factura)
+
+        story.append(Spacer(1, 12))
+
         # Pie de página
         story.append(Paragraph("Representación impresa de la factura electrónica", self._get_small_style()))
         story.append(Paragraph("Generado por sistema autorizado por el SRI", self._get_small_style()))
+
+    def _agregar_qr_code(self, story: List, factura: Factura):
+        """Agregar código QR de la factura"""
+        try:
+            import qrcode
+            from io import BytesIO
+
+            # URL de consulta según ambiente
+            if factura.ambiente == "2":  # Producción
+                url = f"https://www.sri.gob.ec/facturacion-internet/#/consultas/comprobantes?clave={factura.clave_acceso}"
+            else:  # Pruebas
+                url = f"https://celcer.sri.gob.ec/comprobantes-electronicos-ws/consultas/comprobantes?clave={factura.clave_acceso}"
+
+            # Generar código QR
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=4,
+                border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+
+            # Crear imagen
+            img_qr = qr.make_image(fill_color="black", back_color="white")
+
+            # Guardar en buffer
+            buffer = BytesIO()
+            img_qr.save(buffer, format='PNG')
+            buffer.seek(0)
+
+            # Agregar al PDF
+            story.append(Paragraph("<b>CÓDIGO QR PARA CONSULTA EN EL SRI</b>", self._get_subtitle_style()))
+            story.append(Spacer(1, 6))
+            qr_image = Image(buffer, width=1.5*inch, height=1.5*inch)
+            story.append(qr_image)
+            story.append(Paragraph("Escanee este código para verificar la factura en el portal del SRI", self._get_small_style()))
+
+        except Exception as e:
+            # Si falla la generación del QR, continuar sin él
+            logger.error(f"Error al generar código QR: {str(e)}")
+            story.append(Paragraph("<i>Código QR no disponible</i>", self._get_small_style()))
     
     def _get_title_style(self) -> ParagraphStyle:
         """Obtener estilo para títulos"""

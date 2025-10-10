@@ -110,9 +110,9 @@ class XadesBesSigner:
         canon_method = etree.SubElement(signed_info, "CanonicalizationMethod")
         canon_method.set("Algorithm", "http://www.w3.org/TR/2001/REC-xml-c14n-20010315")
         
-        # Signature method
+        # Signature method (SHA-256)
         sig_method = etree.SubElement(signed_info, "SignatureMethod")
-        sig_method.set("Algorithm", "http://www.w3.org/2000/09/xmldsig#rsa-sha1")
+        sig_method.set("Algorithm", "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
         
         # Reference
         reference = etree.SubElement(signed_info, "Reference")
@@ -129,9 +129,9 @@ class XadesBesSigner:
         transform2 = etree.SubElement(transforms, "Transform")
         transform2.set("Algorithm", "http://www.w3.org/TR/2001/REC-xml-c14n-20010315")
         
-        # Digest method
+        # Digest method (SHA-256)
         digest_method = etree.SubElement(reference, "DigestMethod")
-        digest_method.set("Algorithm", "http://www.w3.org/2000/09/xmldsig#sha1")
+        digest_method.set("Algorithm", "http://www.w3.org/2001/04/xmlenc#sha256")
         
         # Calcular digest del documento
         digest_value = etree.SubElement(reference, "DigestValue")
@@ -140,12 +140,12 @@ class XadesBesSigner:
         # Signature value
         signature_value = etree.SubElement(signature, "SignatureValue")
         
-        # Firmar SignedInfo
+        # Firmar SignedInfo con SHA-256
         signed_info_canon = etree.tostring(signed_info, method="c14n", exclusive=False)
         signature_bytes = self.private_key_crypto.sign(
             signed_info_canon,
             padding.PKCS1v15(),
-            hashes.SHA1()
+            hashes.SHA256()
         )
         signature_value.text = base64.b64encode(signature_bytes).decode()
         
@@ -168,22 +168,22 @@ class XadesBesSigner:
     
     def _calculate_digest(self, element) -> str:
         """
-        Calcular digest SHA1 del elemento
-        
+        Calcular digest SHA-256 del elemento
+
         Args:
             element: Elemento XML
-            
+
         Returns:
             str: Digest en base64
         """
         # Canonicalizar el elemento sin la firma
         canon_xml = etree.tostring(element, method="c14n", exclusive=False)
-        
-        # Calcular hash SHA1
-        sha1_hash = hashlib.sha1(canon_xml).digest()
-        
+
+        # Calcular hash SHA-256
+        sha256_hash = hashlib.sha256(canon_xml).digest()
+
         # Convertir a base64
-        return base64.b64encode(sha1_hash).decode()
+        return base64.b64encode(sha256_hash).decode()
     
     def verify_signature(self, signed_xml: str) -> bool:
         """

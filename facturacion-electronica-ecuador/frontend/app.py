@@ -10,10 +10,6 @@ import json
 from typing import Dict, List, Optional
 import base64
 from io import BytesIO
-import json
-from typing import Dict, List, Optional
-import base64
-from io import BytesIO
 
 # Importar módulos locales
 from config import (
@@ -22,7 +18,7 @@ from config import (
     get_page_config, get_menu_options, get_api_base_url
 )
 from utils import (
-    format_currency, format_date, create_metric_card,
+    format_currency, format_date, format_percentage, create_metric_card,
     display_factura_table, create_sales_chart, create_pie_chart,
     DataValidator, create_export_options
 )
@@ -121,6 +117,8 @@ class APIClient:
                     # Centralizar el manejo del token
                     self._set_token(access_token)
                     st.session_state.user_data = data.get("user_data", {})
+                    # Limpiar la bandera de sesión expirada
+                    st.session_state.session_expired = False
                     return True
                 else:
                     show_message("error", "Respuesta inválida del servidor: falta access_token")
@@ -169,8 +167,32 @@ class APIClient:
                 self._handle_unauthorized()
                 return None
             else:
-                error_msg = response.text if response.text else f"Error {response.status_code}"
-                show_message("error", f"Error en petición: {error_msg}")
+                # Intentar extraer el mensaje de error del JSON
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Error desconocido")
+
+                    # Si el error es una lista de errores de validación, formatearlos
+                    if isinstance(error_detail, list):
+                        error_messages = []
+                        for err in error_detail:
+                            if isinstance(err, dict):
+                                loc = " -> ".join(str(x) for x in err.get("loc", []))
+                                msg = err.get("msg", "")
+                                error_messages.append(f"{loc}: {msg}")
+                            else:
+                                error_messages.append(str(err))
+                        error_detail = "\n".join(error_messages)
+
+                    show_message("error", f"Error en petición: {error_detail}")
+                    # También imprimir en consola para debugging
+                    print(f"DEBUG - Error del servidor: {response.status_code}")
+                    print(f"DEBUG - Respuesta completa: {response.text}")
+                except Exception as e:
+                    error_msg = response.text if response.text else f"HTTP {response.status_code}"
+                    show_message("error", f"Error en petición: {error_msg}")
+                    print(f"DEBUG - No se pudo parsear error: {str(e)}")
+                    print(f"DEBUG - Respuesta: {response.text}")
                 return None
 
         except requests.exceptions.RequestException as e:
@@ -179,6 +201,25 @@ class APIClient:
         except Exception as e:
             show_message("error", f"Error inesperado: {str(e)}")
             return None
+
+    def _handle_unauthorized(self):
+        """Manejar respuestas 401 (no autorizado) - marcar sesión como expirada"""
+        try:
+            # Marcar que la sesión expiró para evitar redirect loop
+            if not st.session_state.get("session_expired", False):
+                st.session_state.session_expired = True
+
+                # Limpiar token y estado de autenticación
+                self._set_token(None)
+                st.session_state.authenticated = False
+
+                # Mostrar mensaje al usuario
+                st.warning("⚠️ Su sesión ha expirado. Por favor, inicie sesión nuevamente.")
+        except Exception as e:
+            # Si hay algún error, al menos intentar limpiar manualmente
+            st.session_state.token = None
+            st.session_state.authenticated = False
+            st.session_state.session_expired = True
 
     def _refresh_token_if_needed(self):
         """Verificar si el token es válido y refrescar si es necesario"""
@@ -199,8 +240,6 @@ class APIClient:
             # En caso de error al intentar refrescar, tratamos como no autorizado.
             show_message("error", f"Error al refrescar token: {str(e)}")
             return False
-        clear_session_state()
-        st.rerun()
 
 # Inicializar cliente API
 # Eliminamos @st.cache_resource para evitar problemas de persistencia
@@ -304,16 +343,20 @@ def sidebar_navigation():
 
         # Estado del sistema
         st.markdown("### 🔧 Estado del Sistema")
-        
-        # Verificar conexión con API
-        try:
-            health = api_client.get("/health")
-            if health:
-                st.success("🟢 API Conectada")
-            else:
-                st.error("🔴 API Desconectada")
-        except:
-            st.error("🔴 Sin Conexión")
+
+        # Verificar conexión con API (solo si estamos autenticados y la sesión no ha expirado)
+        if not st.session_state.get("session_expired", False):
+            try:
+                # No llamar a /health en el sidebar ya que puede causar redirect loop
+                # En su lugar, solo mostrar el estado basado en la autenticación
+                if st.session_state.get("authenticated", False) and st.session_state.get("token"):
+                    st.success("🟢 Sesión Activa")
+                else:
+                    st.warning("🟡 Sesión No Iniciada")
+            except Exception:
+                st.error("🔴 Sin Conexión")
+        else:
+            st.warning("🟡 Sesión Expirada")
         
         # Información adicional
         st.markdown("---")
@@ -460,7 +503,7 @@ def productos_page():
             
             # Formatear datos
             df['precio_fmt'] = df['precio_unitario'].apply(format_currency)
-            df['iva_fmt'] = df['porcentaje_iva'].apply(lambda x: f"{x*100:.1f}%")
+            df['iva_fmt'] = df['porcentaje_iva'].apply(format_percentage)
             
             # Mostrar tabla
             columns_display = {
