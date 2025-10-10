@@ -314,17 +314,30 @@ def sidebar_navigation():
         # Opciones de menú
         menu_options = get_menu_options()
 
-        selected = None
-        for option in menu_options:
-            if st.button(f"{option['icon']} {option['label']}", key=option['key'], use_container_width=True):
-                selected = option['key']
-                break
+        # Obtener página actual
+        current_page = st.session_state.get("current_page", "dashboard")
 
-        # Si no se seleccionó nada, mantener la página actual
-        if not selected:
-            selected = st.session_state.get("current_page", "dashboard")
-        else:
-            st.session_state.current_page = selected
+        # Renderizar todos los botones y detectar si alguno fue presionado
+        for option in menu_options:
+            # Determinar si este botón corresponde a la página activa
+            is_active = (current_page == option['key'])
+
+            # Usar type="primary" para el botón activo
+            button_type = "primary" if is_active else "secondary"
+
+            if st.button(
+                f"{option['icon']} {option['label']}",
+                key=option['key'],
+                use_container_width=True,
+                type=button_type
+            ):
+                # Cambiar la página actual
+                st.session_state.current_page = option['key']
+                current_page = option['key']
+                st.rerun()
+
+        # La página seleccionada es la almacenada en session_state
+        selected = current_page
 
         # Manejar cerrar sesión
         if selected == "logout":
@@ -378,36 +391,29 @@ def dashboard_page():
     if stats:
         # Métricas principales
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
-            delta_facturas = stats.get("delta_facturas", 0)
-            delta_color = "normal" if delta_facturas >= 0 else "inverse"
             st.metric(
-                label="📄 Facturas del Mes",
-                value=stats.get("facturas_mes", 0),
-                delta=delta_facturas,
-                delta_color=delta_color
+                label="📄 Facturas Emitidas",
+                value=stats.get("total_facturas_emitidas", 0)
             )
-        
+
         with col2:
-            delta_ventas = stats.get("delta_ventas", 0)
             st.metric(
-                label="💰 Ventas del Mes",
-                value=format_currency(stats.get("ventas_mes", 0)),
-                delta=format_currency(delta_ventas)
+                label="✅ Facturas Autorizadas",
+                value=stats.get("total_facturas_autorizadas", 0)
             )
-        
+
         with col3:
             st.metric(
                 label="👥 Clientes Activos",
-                value=stats.get("clientes_activos", 0),
-                delta=stats.get("delta_clientes", 0)
+                value=stats.get("total_clientes", 0)
             )
-        
+
         with col4:
             st.metric(
                 label="📦 Productos",
-                value=stats.get("productos_activos", 0)
+                value=stats.get("total_articulos", 0)
             )
         
         st.markdown("---")
@@ -769,12 +775,39 @@ def configuracion_page():
         )
         
         if uploaded_file:
-            cert_password = st.text_input("🔒 Contraseña del Certificado", type="password")
-            
+            cert_password = st.text_input("🔒 Contraseña del Certificado", type="password", key="cert_password_input")
+
             if st.button("💾 Guardar Certificado"):
                 if cert_password:
-                    # Aquí iría la lógica para guardar el certificado
-                    show_message("data_saved", "Certificado guardado exitosamente")
+                    try:
+                        # Preparar datos para envío
+                        files = {
+                            'file': (uploaded_file.name, uploaded_file.getvalue(), 'application/x-pkcs12')
+                        }
+                        data = {
+                            'password': cert_password
+                        }
+
+                        # Enviar al backend
+                        headers = api_client.get_headers()
+                        headers.pop('Content-Type', None)  # Dejar que requests maneje multipart/form-data
+
+                        response = api_client.session.post(
+                            f"{api_client.base_url}/configuracion/certificado",
+                            files=files,
+                            data=data,
+                            headers=headers,
+                            timeout=30
+                        )
+
+                        if response.status_code in [200, 201]:
+                            show_message("data_saved", "Certificado guardado exitosamente")
+                            st.rerun()
+                        else:
+                            error_msg = response.json().get('detail', 'Error desconocido') if response.text else f"HTTP {response.status_code}"
+                            show_message("error", f"Error al guardar certificado: {error_msg}")
+                    except Exception as e:
+                        show_message("error", f"Error al subir certificado: {str(e)}")
                 else:
                     show_message("error", "Ingrese la contraseña del certificado")
         
@@ -874,7 +907,13 @@ def main():
             dashboard_page()  # Página por defecto
     
     except Exception as e:
+        import traceback
         st.error(f"❌ Error al cargar la página: {str(e)}")
+
+        # Mostrar el stack trace completo para debugging
+        with st.expander("🔍 Ver detalles del error (para debugging)"):
+            st.code(traceback.format_exc())
+
         st.info("Por favor, recargue la página o contacte al soporte técnico.")
 
 if __name__ == "__main__":

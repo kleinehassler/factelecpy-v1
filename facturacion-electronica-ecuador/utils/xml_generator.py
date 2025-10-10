@@ -362,17 +362,18 @@ class ClaveAccesoGenerator:
 
         # Fecha: ddmmaaaa
         fecha_str = fecha_emision.strftime("%d%m%Y")
-        
+
+        # Asegurar que todos los parámetros sean strings antes de concatenar
         # Construir clave sin dígito verificador (48 dígitos)
         clave_base = (
-            fecha_str +              # 8 dígitos
-            tipo_comprobante +       # 2 dígitos  
-            ruc +                    # 13 dígitos
-            ambiente +               # 1 dígito
-            serie +                  # 6 dígitos (estab + pto emi)
-            numero.zfill(9) +        # 9 dígitos
-            codigo_numerico +        # 8 dígitos
-            tipo_emision             # 1 dígito
+            str(fecha_str) +                # 8 dígitos
+            str(tipo_comprobante) +         # 2 dígitos
+            str(ruc) +                      # 13 dígitos
+            str(ambiente) +                 # 1 dígito
+            str(serie) +                    # 6 dígitos (estab + pto emi)
+            str(numero).zfill(9) +          # 9 dígitos
+            str(codigo_numerico) +          # 8 dígitos
+            str(tipo_emision)               # 1 dígito
         )
         
         # Calcular dígito verificador

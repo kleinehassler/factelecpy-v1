@@ -10,13 +10,24 @@ from typing import Dict, List, Optional
 def format_currency(amount) -> str:
     """Formatear cantidad como moneda"""
     try:
+        # Si ya es un string que empieza con $, retornarlo tal cual
+        if isinstance(amount, str) and amount.startswith('$'):
+            return amount
+
+        # Si es None, retornar $0.00
+        if amount is None:
+            return "$0.00"
+
         # Convertir a float si es string o Decimal
         if isinstance(amount, str):
+            # Limpiar el string de caracteres no numéricos (excepto . y -)
+            amount = amount.replace('$', '').replace(',', '').strip()
             amount = float(amount)
         elif not isinstance(amount, (int, float)):
             amount = float(amount)
+
         return f"${amount:,.2f}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return "$0.00"
 
 def format_date(date_obj) -> str:
@@ -71,9 +82,9 @@ def display_factura_table(facturas: List[Dict], show_actions: bool = True):
     # Formatear columnas
     if 'fecha_emision' in df.columns:
         df['fecha_emision'] = pd.to_datetime(df['fecha_emision']).dt.strftime('%d/%m/%Y')
-    
+
     if 'valor_total' in df.columns:
-        df['valor_total'] = df['valor_total'].apply(lambda x: f"${x:,.2f}")
+        df['valor_total'] = df['valor_total'].apply(format_currency)
     
     if 'estado_sri' in df.columns:
         df['estado'] = df['estado_sri'].apply(create_status_badge)
@@ -93,22 +104,27 @@ def create_sales_chart(data: List[Dict], chart_type: str = "line"):
     if not data:
         st.info("No hay datos para mostrar")
         return
-    
+
     df = pd.DataFrame(data)
-    
+
+    # Detectar automáticamente las columnas disponibles
+    # Soporta tanto 'fecha'/'ventas' como 'mes'/'total'
+    x_col = 'mes' if 'mes' in df.columns else 'fecha'
+    y_col = 'total' if 'total' in df.columns else 'ventas'
+
     if chart_type == "line":
-        fig = px.line(df, x='fecha', y='ventas', title='Evolución de Ventas')
+        fig = px.line(df, x=x_col, y=y_col, title='Evolución de Ventas')
     elif chart_type == "bar":
-        fig = px.bar(df, x='fecha', y='ventas', title='Ventas por Período')
+        fig = px.bar(df, x=x_col, y=y_col, title='Ventas por Período')
     else:
-        fig = px.area(df, x='fecha', y='ventas', title='Área de Ventas')
-    
+        fig = px.area(df, x=x_col, y=y_col, title='Área de Ventas')
+
     fig.update_layout(
-        xaxis_title="Fecha",
+        xaxis_title="Período" if x_col == 'mes' else "Fecha",
         yaxis_title="Ventas ($)",
         showlegend=False
     )
-    
+
     st.plotly_chart(fig, use_container_width=True)
 
 def create_pie_chart(data: List[Dict], values_col: str, names_col: str, title: str):
@@ -189,28 +205,6 @@ def validate_cedula(cedula: str) -> bool:
 
     except (ValueError, IndexError):
         return False
-    
-    try:
-        # Algoritmo de validación de cédula
-        provincia = int(cedula[:2])
-        if provincia < 1 or provincia > 24:
-            return False
-        
-        # Algoritmo módulo 10
-        coeficientes = [2, 1, 2, 1, 2, 1, 2, 1, 2]
-        suma = 0
-        
-        for i in range(9):
-            valor = int(cedula[i]) * coeficientes[i]
-            if valor >= 10:
-                valor = valor - 9
-            suma += valor
-        
-        digito_verificador = (10 - (suma % 10)) % 10
-        return digito_verificador == int(cedula[9])
-    
-    except ValueError:
-        return False
 
 def show_loading():
     """Mostrar indicador de carga"""
@@ -226,6 +220,8 @@ def show_error_message(message: str):
 
 def show_warning_message(message: str):
     """Mostrar mensaje de advertencia"""
+    st.warning(f"⚠️ {message}")
+
 def show_info_message(message: str):
     """Mostrar mensaje informativo"""
     st.info(f"ℹ️ {message}")
@@ -304,33 +300,6 @@ class DataValidator:
             return len(identificacion) > 0 and len(identificacion) <= 20
         else:
             return False
-
-class DataValidator:
-    """Validador de datos"""
-    
-    @staticmethod
-    def validate_email(email: str) -> bool:
-        """Validar email"""
-        import re
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return re.match(pattern, email) is not None
-    
-    @staticmethod
-    def validate_phone(phone: str) -> bool:
-        """Validar teléfono"""
-        import re
-        # Formato ecuatoriano: 02-1234567 o 09-12345678
-        pattern = r'^0[2-9]-?\d{7,8}$'
-        return re.match(pattern, phone.replace(' ', '')) is not None
-    
-    @staticmethod
-    def validate_required_fields(data: Dict, required_fields: List[str]) -> List[str]:
-        """Validar campos requeridos"""
-        missing_fields = []
-        for field in required_fields:
-            if not data.get(field) or str(data.get(field)).strip() == "":
-                missing_fields.append(field)
-        return missing_fields
 
 def create_export_options():
     """Crear opciones de exportación"""

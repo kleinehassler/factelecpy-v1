@@ -26,9 +26,9 @@ class DatabaseManager:
         self._setup_database()
 
     def _setup_database(self):
-        """Configurar conexión a la base de datos con connection pooling"""
+        """Configurar conexión a la base de datos MySQL con connection pooling"""
         try:
-            # Crear motor de base de datos con connection pooling mejorado
+            # Crear motor de base de datos MySQL con connection pooling mejorado
             self.engine = create_engine(
                 settings.DATABASE_URL,
                 pool_size=getattr(settings, "DB_POOL_SIZE", 5),
@@ -188,10 +188,48 @@ class DatabaseManager:
 
 class FacturaRepository:
     """Repositorio para operaciones con facturas"""
-    
+
     def __init__(self, db_session: Session):
         self.db = db_session
-    
+
+    def obtener_siguiente_secuencial(self, tipo_comprobante: str, punto_emision_id: int = 1) -> int:
+        """Obtener y actualizar el siguiente secuencial para un tipo de comprobante.
+
+        Args:
+            tipo_comprobante: Tipo de comprobante (01=Factura, etc.)
+            punto_emision_id: ID del punto de emisión (default: 1)
+
+        Returns:
+            int: Número de secuencia siguiente
+        """
+        try:
+            # Obtener o crear la secuencia
+            secuencia = self.db.query(Secuencia).filter(
+                Secuencia.punto_emision_id == punto_emision_id,
+                Secuencia.tipo_comprobante == tipo_comprobante
+            ).first()
+
+            if not secuencia:
+                # Crear secuencia si no existe
+                secuencia = Secuencia(
+                    punto_emision_id=punto_emision_id,
+                    tipo_comprobante=tipo_comprobante,
+                    secuencia_actual=0
+                )
+                self.db.add(secuencia)
+                self.db.flush()
+
+            # Incrementar secuencia - asegurar que sea int
+            secuencia_valor = int(secuencia.secuencia_actual) if secuencia.secuencia_actual else 0
+            secuencia.secuencia_actual = secuencia_valor + 1
+            siguiente = secuencia.secuencia_actual
+            self.db.flush()  # Asegurar que el cambio se guarda
+
+            return int(siguiente)
+        except Exception as e:
+            logger.error(f"Error al obtener siguiente secuencial: {str(e)}")
+            raise
+
     def crear_factura(self, factura_data: dict) -> Factura:
         """Crear nueva factura de forma transaccional y segura.
 

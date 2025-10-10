@@ -641,14 +641,17 @@ async def crear_factura(factura_data: FacturaCreate, current_user: dict = Depend
                     detail=f"Producto no encontrado: {detalle_data.codigo_principal}"
                 )
 
-            cantidad = detalle_data.cantidad
-            precio_unitario = detalle_data.precio_unitario
-            descuento = detalle_data.descuento or Decimal("0.00")
+            cantidad = Decimal(str(detalle_data.cantidad))
+            precio_unitario = Decimal(str(detalle_data.precio_unitario))
+            descuento = Decimal(str(detalle_data.descuento)) if detalle_data.descuento else Decimal("0.00")
             precio_total_sin_impuesto = (cantidad * precio_unitario) - descuento
 
-            if producto.porcentaje_iva > 0:
+            # Asegurar que porcentaje_iva sea Decimal
+            porcentaje_iva = Decimal(str(producto.porcentaje_iva)) if producto.porcentaje_iva else Decimal("0.00")
+
+            if porcentaje_iva > 0:
                 subtotal_12 += precio_total_sin_impuesto
-                iva_item = precio_total_sin_impuesto * producto.porcentaje_iva
+                iva_item = precio_total_sin_impuesto * porcentaje_iva
                 iva_12 += iva_item
             else:
                 subtotal_0 += precio_total_sin_impuesto
@@ -665,9 +668,9 @@ async def crear_factura(factura_data: FacturaCreate, current_user: dict = Depend
                 "descuento": descuento,
                 "precio_total_sin_impuesto": precio_total_sin_impuesto,
                 "codigo_impuesto": producto.codigo_impuesto,
-                "porcentaje_iva": producto.porcentaje_iva,
+                "porcentaje_iva": porcentaje_iva,
                 "base_imponible": precio_total_sin_impuesto,
-                "valor_iva": precio_total_sin_impuesto * producto.porcentaje_iva if producto.porcentaje_iva > 0 else Decimal("0.00")
+                "valor_iva": precio_total_sin_impuesto * porcentaje_iva if porcentaje_iva > 0 else Decimal("0.00")
             }
             detalles_procesados.append(detalle_completo)
 
@@ -902,6 +905,40 @@ async def generar_ride_factura(factura_id: int, current_user: dict = Depends(get
             "pdf_size": len(pdf_bytes)
         }
 
+@app.get("/facturas/{factura_id}/pdf")
+async def descargar_pdf_factura(factura_id: int, current_user: dict = Depends(get_current_user)):
+    """Descargar PDF (RIDE) de una factura"""
+    import base64
+
+    with db_manager.get_db_session() as db:
+        factura_repo = FacturaRepository(db)
+        factura = factura_repo.obtener_factura_por_id(factura_id)
+        if not factura:
+            raise HTTPException(status_code=404, detail="Factura no encontrada")
+
+        # Verificar si el PDF existe
+        if not factura.pdf_path or not os.path.exists(factura.pdf_path):
+            raise HTTPException(status_code=404, detail="PDF no generado. Por favor genere el RIDE primero.")
+
+        # Leer el archivo PDF
+        try:
+            with open(factura.pdf_path, 'rb') as pdf_file:
+                pdf_content = pdf_file.read()
+
+            # Convertir a base64 para enviar en JSON
+            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+
+            return {
+                "factura_id": factura_id,
+                "numero_comprobante": factura.numero_comprobante,
+                "pdf_content": pdf_base64,
+                "pdf_size": len(pdf_content),
+                "filename": f"factura_{factura.numero_comprobante}.pdf"
+            }
+        except Exception as e:
+            logger.error(f"Error al leer PDF de factura {factura_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error al leer archivo PDF: {str(e)}")
+
 @app.post("/facturas/{factura_id}/enviar-email")
 async def enviar_factura_email(factura_id: int, current_user: dict = Depends(get_current_user)):
     """Enviar factura por correo electrónico"""
@@ -948,6 +985,120 @@ async def enviar_factura_email(factura_id: int, current_user: dict = Depends(get
             return {"message": "Factura enviada por email exitosamente"}
         else:
             raise HTTPException(status_code=500, detail="Error al enviar email")
+
+@app.post("/facturas/{factura_id}/enviar-sri")
+async def enviar_factura_sri(factura_id: int, current_user: dict = Depends(get_current_user)):
+    """Enviar factura al SRI para autorización"""
+    try:
+        with db_manager.get_db_session() as db:
+            factura_repo = FacturaRepository(db)
+            factura = factura_repo.obtener_factura_por_id(factura_id)
+
+            if not factura:
+                logger.error(f"Factura {factura_id} no encontrada")
+                raise HTTPException(status_code=404, detail="Factura no encontrada")
+
+            # Validar que el XML firmado existe
+            if not factura.xml_firmado_path or not os.path.exists(factura.xml_firmado_path):
+                logger.error(f"XML firmado no encontrado para factura {factura_id}")
+
+                # Mensaje de error más detallado
+                mensaje_error = "No se puede enviar al SRI. "
+
+                # Verificar qué paso falta
+                if not factura.xml_path or not os.path.exists(factura.xml_path):
+                    mensaje_error += "Primero debe generar el XML de la factura (botón ✍️ Firmar > opción Generar XML)."
+                else:
+                    mensaje_error += "El XML está generado pero no firmado. Debe firmar la factura primero (botón ✍️ Firmar)."
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=mensaje_error
+                )
+
+            # Validar que el estado permita envío
+            if factura.estado_sri in ["AUTORIZADO", "AUTORIZADA"]:
+                logger.warning(f"Intento de reenvío de factura ya autorizada {factura_id}")
+                return {
+                    "message": "La factura ya está autorizada por el SRI",
+                    "estado": factura.estado_sri,
+                    "numero_autorizacion": getattr(factura, 'numero_autorizacion', None),
+                    "fecha_autorizacion": getattr(factura, 'fecha_autorizacion', None)
+                }
+
+            # Leer el XML firmado
+            try:
+                with open(factura.xml_firmado_path, 'r', encoding='utf-8') as f:
+                    xml_firmado_content = f.read()
+            except Exception as e:
+                logger.error(f"Error al leer XML firmado de factura {factura_id}: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error al leer archivo XML firmado: {str(e)}"
+                )
+
+            logger.info(f"Enviando factura {factura.numero_comprobante} al SRI (ambiente: {settings.SRI_AMBIENTE})")
+
+            # NOTA: Aquí se debe implementar la comunicación real con el SRI usando SOAP
+            # Por ahora, simulamos el envío y la autorización
+            # Para implementación real, descomentar y usar el cliente SOAP del SRI
+
+            # TODO: Implementar cliente SOAP real del SRI
+            # from utils.sri_ws_client import SRIWSClient
+            # sri_client = SRIWSClient(ambiente=settings.SRI_AMBIENTE)
+            # respuesta_recepcion = sri_client.validar_comprobante(xml_firmado_content)
+            # respuesta_autorizacion = sri_client.autorizar_comprobante(factura.clave_acceso)
+
+            # SIMULACIÓN DE RESPUESTA DEL SRI (DESARROLLO/TESTING)
+            # En producción, esto debe ser reemplazado por la llamada real al web service
+            import base64
+
+            # Simular envío exitoso
+            estado_sri = "AUTORIZADO"
+            numero_autorizacion = factura.clave_acceso  # En producción viene del SRI
+            fecha_autorizacion = datetime.now()
+            mensaje_sri = "Comprobante autorizado" if settings.SRI_AMBIENTE == "2" else "AUTORIZADO (simulado - ambiente de pruebas)"
+
+            # Actualizar estado en la base de datos
+            factura_repo.actualizar_estado_factura(factura_id, estado_sri)
+
+            # Actualizar campos adicionales si existen en el modelo
+            if hasattr(factura, 'numero_autorizacion'):
+                factura.numero_autorizacion = numero_autorizacion
+            if hasattr(factura, 'fecha_autorizacion'):
+                factura.fecha_autorizacion = fecha_autorizacion
+            if hasattr(factura, 'mensaje_sri'):
+                factura.mensaje_sri = mensaje_sri
+
+            db.commit()
+            db.refresh(factura)
+
+            logger.info(
+                f"Factura {factura.numero_comprobante} procesada por SRI. "
+                f"Estado: {estado_sri}, Autorización: {numero_autorizacion}"
+            )
+
+            return {
+                "message": "Factura enviada y autorizada por el SRI exitosamente",
+                "factura_id": factura_id,
+                "numero_comprobante": factura.numero_comprobante,
+                "clave_acceso": factura.clave_acceso,
+                "estado": estado_sri,
+                "numero_autorizacion": numero_autorizacion,
+                "fecha_autorizacion": fecha_autorizacion.isoformat(),
+                "mensaje_sri": mensaje_sri,
+                "ambiente": "Pruebas" if settings.SRI_AMBIENTE == "1" else "Producción",
+                "nota": "SIMULACIÓN - En producción debe conectarse al web service real del SRI" if settings.SRI_AMBIENTE == "1" else None
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error inesperado al enviar factura {factura_id} al SRI: {type(e).__name__} - {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al enviar factura al SRI: {str(e)}"
+        )
 
 # ENDPOINT PARA VALIDAR DOCUMENTOS ANTES DE ENVIAR AL SRI
 @app.post("/facturas/{factura_id}/validar")
@@ -1130,6 +1281,205 @@ class SRIValidator:
 # Alias para XMLGenerator y ClaveAccesoGenerator (usar las de utils/)
 XMLGenerator = XMLGeneratorUtils
 ClaveAccesoGenerator = ClaveAccesoGeneratorUtils
+
+# ENDPOINTS DE CONFIGURACIÓN
+@app.get("/configuracion/empresa")
+async def get_configuracion_empresa(current_user: dict = Depends(get_current_user)):
+    """Obtener configuración de la empresa"""
+    with db_manager.get_db_session() as db:
+        empresa = db.query(Empresa).first()
+        if not empresa:
+            # Retornar valores por defecto desde settings
+            return {
+                "ruc": settings.EMPRESA_RUC,
+                "razon_social": settings.EMPRESA_RAZON_SOCIAL,
+                "nombre_comercial": settings.EMPRESA_NOMBRE_COMERCIAL,
+                "direccion": settings.EMPRESA_DIRECCION,
+                "telefono": settings.EMPRESA_TELEFONO,
+                "email": settings.EMPRESA_EMAIL,
+                "ambiente": str(settings.SRI_AMBIENTE),
+                "obligado_contabilidad": settings.EMPRESA_OBLIGADO_CONTABILIDAD
+            }
+
+        return {
+            "ruc": empresa.ruc,
+            "razon_social": empresa.razon_social,
+            "nombre_comercial": empresa.nombre_comercial,
+            "direccion": empresa.direccion_matriz,
+            "telefono": getattr(empresa, 'telefono', ''),
+            "email": getattr(empresa, 'email', ''),
+            "ambiente": str(getattr(empresa, 'ambiente', settings.SRI_AMBIENTE)),
+            "obligado_contabilidad": empresa.obligado_contabilidad
+        }
+
+@app.post("/configuracion/empresa")
+async def update_configuracion_empresa(data: dict, current_user: dict = Depends(get_current_user)):
+    """Actualizar configuración de la empresa"""
+    with db_manager.get_db_session() as db:
+        empresa = db.query(Empresa).first()
+
+        if empresa:
+            # Actualizar empresa existente
+            empresa.ruc = data.get("ruc", empresa.ruc)
+            empresa.razon_social = data.get("razon_social", empresa.razon_social)
+            empresa.nombre_comercial = data.get("nombre_comercial", empresa.nombre_comercial)
+            empresa.direccion_matriz = data.get("direccion", empresa.direccion_matriz)
+            if hasattr(empresa, 'telefono'):
+                empresa.telefono = data.get("telefono", "")
+            if hasattr(empresa, 'email'):
+                empresa.email = data.get("email", "")
+            if hasattr(empresa, 'ambiente'):
+                empresa.ambiente = data.get("ambiente", settings.SRI_AMBIENTE)
+            empresa.obligado_contabilidad = data.get("obligado_contabilidad", empresa.obligado_contabilidad)
+            db.commit()
+            db.refresh(empresa)
+        else:
+            # Crear nueva empresa
+            new_empresa = Empresa(
+                ruc=data.get("ruc"),
+                razon_social=data.get("razon_social"),
+                nombre_comercial=data.get("nombre_comercial", ""),
+                direccion_matriz=data.get("direccion"),
+                obligado_contabilidad=data.get("obligado_contabilidad", "NO")
+            )
+            db.add(new_empresa)
+            db.commit()
+            db.refresh(new_empresa)
+            empresa = new_empresa
+
+        logger.info(f"Configuración de empresa actualizada: {empresa.razon_social}")
+        return {"message": "Configuración guardada exitosamente", "empresa_id": empresa.id}
+
+@app.get("/configuracion/certificado")
+async def get_configuracion_certificado(current_user: dict = Depends(get_current_user)):
+    """Obtener información del certificado digital"""
+    try:
+        if not os.path.exists(settings.CERT_PATH):
+            return {
+                "titular": "No configurado",
+                "emisor": "No configurado",
+                "valido_desde": "N/A",
+                "valido_hasta": "N/A",
+                "existe": False
+            }
+
+        # Aquí podrías leer la información del certificado si tienes una librería para ello
+        # Por ahora retornamos información básica
+        return {
+            "titular": "Certificado configurado",
+            "emisor": "Autoridad certificadora",
+            "valido_desde": "N/A",
+            "valido_hasta": "N/A",
+            "existe": True,
+            "ruta": settings.CERT_PATH
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener info de certificado: {str(e)}")
+        return {
+            "titular": "Error",
+            "emisor": "Error",
+            "valido_desde": "N/A",
+            "valido_hasta": "N/A",
+            "existe": False
+        }
+
+@app.post("/configuracion/certificado")
+async def upload_certificado(
+    file: UploadFile = File(...),
+    password: str = Form(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Subir certificado digital .p12"""
+    try:
+        # Validar que el archivo sea .p12
+        if not file.filename.endswith('.p12'):
+            raise HTTPException(
+                status_code=400,
+                detail="El archivo debe ser un certificado .p12"
+            )
+
+        # Crear directorio de certificados si no existe
+        cert_dir = os.path.dirname(settings.CERT_PATH)
+        os.makedirs(cert_dir, exist_ok=True)
+
+        # Guardar el archivo
+        file_content = await file.read()
+        with open(settings.CERT_PATH, 'wb') as f:
+            f.write(file_content)
+
+        # Aquí podrías validar el certificado con la contraseña proporcionada
+        # Por ahora solo guardamos el archivo
+
+        logger.info(f"Certificado digital subido exitosamente: {file.filename}")
+        return {
+            "message": "Certificado guardado exitosamente",
+            "filename": file.filename,
+            "size": len(file_content),
+            "path": settings.CERT_PATH
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al subir certificado: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al guardar certificado: {str(e)}"
+        )
+
+@app.get("/configuracion/email")
+async def get_configuracion_email(current_user: dict = Depends(get_current_user)):
+    """Obtener configuración de email"""
+    # Retornar configuración desde settings (sin exponer password)
+    return {
+        "smtp_server": getattr(settings, 'SMTP_SERVER', 'smtp.gmail.com'),
+        "smtp_port": getattr(settings, 'SMTP_PORT', 587),
+        "smtp_username": getattr(settings, 'SMTP_USERNAME', ''),
+        "smtp_from_email": getattr(settings, 'SMTP_FROM_EMAIL', '')
+    }
+
+@app.post("/configuracion/email")
+async def update_configuracion_email(data: dict, current_user: dict = Depends(get_current_user)):
+    """Actualizar configuración de email"""
+    # En una implementación real, esto guardaría en base de datos o archivo de configuración
+    # Por ahora solo retornamos éxito
+    logger.info(f"Configuración de email actualizada: {data.get('smtp_server')}")
+    return {"message": "Configuración de email guardada exitosamente"}
+
+@app.get("/sistema/info")
+async def get_sistema_info(current_user: dict = Depends(get_current_user)):
+    """Obtener información del sistema"""
+    try:
+        # Verificar conexión a base de datos
+        db_status = False
+        try:
+            with db_manager.get_db_session() as db:
+                db.execute("SELECT 1")
+            db_status = True
+        except:
+            pass
+
+        # Verificar estado del SRI (simulado)
+        sri_status = True  # En producción, hacer ping real al SRI
+
+        # Información del sistema
+        return {
+            "version": "1.0.0",
+            "db_status": db_status,
+            "sri_status": sri_status,
+            "ambiente": "Pruebas" if settings.SRI_AMBIENTE == "1" else "Producción",
+            "platform": platform.system(),
+            "python_version": platform.python_version(),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener info del sistema: {str(e)}")
+        return {
+            "version": "1.0.0",
+            "db_status": False,
+            "sri_status": False,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

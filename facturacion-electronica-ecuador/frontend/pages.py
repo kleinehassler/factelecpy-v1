@@ -93,7 +93,18 @@ class FacturasPage:
         if facturas:
             # Estadísticas rápidas
             total_facturas = len(facturas)
-            total_ventas = sum(f.get('valor_total', 0) for f in facturas)
+            # Convertir valor_total a float de forma defensiva
+            total_ventas = 0
+            for f in facturas:
+                try:
+                    valor = f.get('valor_total', 0)
+                    # Convertir a float si es string
+                    if isinstance(valor, str):
+                        valor = float(valor.replace('$', '').replace(',', '').strip())
+                    total_ventas += float(valor)
+                except (ValueError, TypeError, AttributeError):
+                    # Si no se puede convertir, ignorar este valor
+                    continue
             
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -111,29 +122,135 @@ class FacturasPage:
             
             # Formatear datos para mostrar
             if not df.empty:
-                df['fecha_emision'] = pd.to_datetime(df['fecha_emision']).dt.strftime('%d/%m/%Y %H:%M')
-                df['valor_total_fmt'] = df['valor_total'].apply(format_currency)
-                df['estado_badge'] = df['estado_sri'].apply(create_status_badge)
-                
-                # Columnas a mostrar
-                columns_display = {
+                # Formatear columnas que existen
+                if 'fecha_emision' in df.columns:
+                    df['fecha_emision'] = pd.to_datetime(df['fecha_emision']).dt.strftime('%d/%m/%Y %H:%M')
+
+                if 'valor_total' in df.columns:
+                    df['valor_total_fmt'] = df['valor_total'].apply(format_currency)
+
+                if 'estado_sri' in df.columns:
+                    df['estado_badge'] = df['estado_sri'].apply(create_status_badge)
+
+                # Definir columnas deseadas con sus nombres para mostrar
+                columns_map = {
                     'numero_comprobante': 'Número',
                     'fecha_emision': 'Fecha',
                     'cliente_nombre': 'Cliente',
+                    'razon_social': 'Cliente',  # Alternativa si no existe cliente_nombre
                     'valor_total_fmt': 'Total',
                     'estado_badge': 'Estado'
                 }
-                
+
+                # Filtrar solo las columnas que existen en el DataFrame
+                columns_display = {}
+                for col, label in columns_map.items():
+                    if col in df.columns:
+                        # Si ya hay una columna con ese label, no la agregamos
+                        if label not in columns_display.values():
+                            columns_display[col] = label
+
                 # Selección de facturas
-                selected_facturas = st.multiselect(
-                    "Seleccionar facturas para acciones:",
-                    options=df['id'].tolist(),
-                    format_func=lambda x: df[df['id']==x]['numero_comprobante'].iloc[0]
-                )
-                
-                # Mostrar tabla
-                display_df = df.rename(columns=columns_display)[list(columns_display.values())]
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
+                if 'id' in df.columns and 'numero_comprobante' in df.columns:
+                    selected_facturas = st.multiselect(
+                        "Seleccionar facturas para acciones:",
+                        options=df['id'].tolist(),
+                        format_func=lambda x: df[df['id']==x]['numero_comprobante'].iloc[0]
+                    )
+                else:
+                    selected_facturas = []
+
+                # Mostrar tabla con botones de acción para cada factura
+                st.markdown("### 📋 Facturas")
+
+                for idx, factura in facturas.iterrows() if isinstance(facturas, pd.DataFrame) else enumerate(facturas):
+                    # Si facturas es una lista, acceder al elemento
+                    if isinstance(facturas, list):
+                        fac = factura
+                        factura_id = fac.get('id')
+                    else:
+                        fac = factura.to_dict()
+                        factura_id = fac.get('id')
+
+                    with st.container():
+                        # Crear layout para cada factura - Ajustado para más botones
+                        col1, col2, col3, col4, col5, col_xml, col_sign, col_sri, col_print, col_cancel = st.columns([2, 1.5, 2, 1.5, 1, 0.7, 0.7, 0.7, 0.7, 0.7])
+
+                        with col1:
+                            numero = fac.get('numero_comprobante', 'N/A')
+                            st.markdown(f"**{numero}**")
+
+                        with col2:
+                            # Mostrar fecha
+                            fecha = fac.get('fecha_emision', 'N/A')
+                            if isinstance(fecha, str) and fecha != 'N/A':
+                                try:
+                                    fecha_dt = pd.to_datetime(fecha)
+                                    fecha = fecha_dt.strftime('%d/%m/%Y')
+                                except:
+                                    pass
+                            st.text(str(fecha))
+
+                        with col3:
+                            # Mostrar cliente
+                            cliente = fac.get('cliente_nombre') or fac.get('razon_social', 'N/A')
+                            # Truncar si es muy largo
+                            if len(str(cliente)) > 18:
+                                cliente = str(cliente)[:15] + "..."
+                            st.text(str(cliente))
+
+                        with col4:
+                            # Mostrar total
+                            total = fac.get('valor_total', 0)
+                            st.text(format_currency(total))
+
+                        with col5:
+                            # Mostrar estado
+                            estado = fac.get('estado_sri', 'N/A')
+                            st.markdown(create_status_badge(estado))
+
+                        with col_xml:
+                            # Botón generar XML
+                            estado_actual = fac.get('estado_sri', 'PENDIENTE')
+
+                            if st.button("📝", key=f"xml_{factura_id}", help="Generar XML"):
+                                if self._generar_xml_factura(factura_id):
+                                    st.rerun()
+
+                        with col_sign:
+                            # Botón firmar
+                            if st.button("✍️", key=f"sign_{factura_id}", help="Firmar con certificado digital"):
+                                if self._firmar_factura(factura_id):
+                                    st.rerun()
+
+                        with col_sri:
+                            # Botón enviar SRI - con indicador visual
+                            estado_actual = fac.get('estado_sri', 'PENDIENTE')
+
+                            # Determinar si se puede enviar al SRI
+                            ya_autorizado = estado_actual in ['AUTORIZADO', 'AUTORIZADA']
+
+                            if ya_autorizado:
+                                # Mostrar check si ya está autorizado
+                                st.markdown("✅", help="Ya autorizado")
+                            else:
+                                # Botón siempre habilitado - el backend validará
+                                if st.button("🚀", key=f"sri_{factura_id}", help="Enviar al SRI"):
+                                    if self._enviar_sri(factura_id):
+                                        st.rerun()
+
+                        with col_print:
+                            # Botón imprimir
+                            if st.button("🖨️", key=f"print_{factura_id}", help="Imprimir RIDE (PDF)"):
+                                self._imprimir_factura(factura_id)
+
+                        with col_cancel:
+                            # Botón anular
+                            if st.button("❌", key=f"cancel_{factura_id}", help="Anular factura"):
+                                self._anular_factura(factura_id)
+                                st.rerun()
+
+                        st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
 
                 # Acciones masivas
                 if selected_facturas:
@@ -167,58 +284,6 @@ class FacturasPage:
                         if st.button("🔍 Consultar SRI", key="check_sri"):
                             for factura_id in selected_facturas:
                                 self._consultar_autorizacion(factura_id)
-
-                        # Columnas a mostrar
-                        columns_display = {
-                            'numero_comprobante': 'Número',
-                            'fecha_emision': 'Fecha',
-                            'cliente_nombre': 'Cliente',
-                            'valor_total_fmt': 'Total',
-                            'estado_badge': 'Estado'
-                        }
-
-                        # Selección de facturas (permitir seleccionar por acciones individuales)
-                        selected_facturas = st.multiselect(
-                            "Seleccionar facturas para acciones:",
-                            options=df['id'].tolist(),
-                            format_func=lambda x: df[df['id']==x]['numero_comprobante'].iloc[0]
-                        )
-
-                        # Mostrar tabla de facturas
-                        display_df = df.rename(columns=columns_display)[list(columns_display.values())]
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-                        # Acciones individuales por factura
-                        if selected_facturas:
-                            st.markdown("### 🔧 Acciones Individuales")
-                            for factura_id in selected_facturas:
-                                factura = df[df['id'] == factura_id].iloc[0]
-                                with st.expander(f"Factura {factura['numero_comprobante']} - {factura['cliente_nombre']}"):
-                                    col1, col2, col3, col4, col5 = st.columns(5)
-
-                                    with col1:
-                                        if st.button("📧 Email", key=f"email_{factura_id}"):
-                                            self._enviar_facturas_email([factura_id])
-
-                                    with col2:
-                                        if st.button("📄 PDF", key=f"pdf_{factura_id}"):
-                                            self._descargar_facturas_pdf([factura_id])
-
-                                    with col3:
-                                        if st.button("📜 XML", key=f"xml_{factura_id}"):
-                                            self._generar_xml_factura(factura_id)
-
-                                    with col4:
-                                        if factura.get('estado_sri') == 'GENERADO' and st.button("✍️ Firmar", key=f"sign_{factura_id}"):
-                                            self._firmar_factura(factura_id)
-
-                                    with col5:
-                                        if factura.get('estado_sri') == 'FIRMADO' and st.button("🚀 Enviar SRI", key=f"sri_{factura_id}"):
-                                            self._enviar_sri(factura_id)
-
-                                    # Consultar autorización (si aplica)
-                                    if factura.get('estado_sri') in ['ENVIADO_SRI', 'FIRMADO'] and st.button("🔍 Consultar Autorización", key=f"auth_{factura_id}"):
-                                        self._consultar_autorizacion(factura_id)
         else:
             st.info("No se encontraron facturas con los filtros aplicados")
 
@@ -265,17 +330,29 @@ class FacturasPage:
 
             if cliente_option == "Seleccionar existente":
                 clientes = self.api_client.get("/clientes/")
-                if clientes:
-                    cliente_options = {
-                        f"{c['razon_social']} - {c['identificacion']}": c['id']
-                        for c in clientes
-                    }
-                    cliente_seleccionado = st.selectbox(
-                        "Cliente",
-                        options=list(cliente_options.keys()),
-                        key="cliente_seleccionado_select"
-                    )
-                    cliente_id = cliente_options.get(cliente_seleccionado)
+                if clientes and isinstance(clientes, list) and len(clientes) > 0:
+                    # Convertir todos los valores a string de forma defensiva
+                    cliente_options = {}
+                    for c in clientes:
+                        try:
+                            razon = str(c.get('razon_social', ''))
+                            ident = str(c.get('identificacion', ''))
+                            label = f"{razon} - {ident}"
+                            cliente_options[label] = c.get('id')
+                        except (TypeError, AttributeError) as e:
+                            # Skip clientes con datos malformados
+                            continue
+
+                    if cliente_options:
+                        cliente_seleccionado = st.selectbox(
+                            "Cliente",
+                            options=list(cliente_options.keys()),
+                            key="cliente_seleccionado_select"
+                        )
+                        cliente_id = cliente_options.get(cliente_seleccionado)
+                    else:
+                        st.warning("No hay clientes válidos registrados")
+                        cliente_id = None
                 else:
                     st.warning("No hay clientes registrados")
                     cliente_id = None
@@ -308,16 +385,29 @@ class FacturasPage:
 
         with col1:
             productos = self.api_client.get("/productos/")
-            if productos:
-                producto_options = {
-                    f"{p['descripcion']} - {format_currency(p['precio_unitario'])}": p
-                    for p in productos
-                }
-                producto_sel = st.selectbox(
-                    "Producto",
-                    options=list(producto_options.keys()),
-                    key="producto_select_nuevo"
-                )
+            if productos and isinstance(productos, list) and len(productos) > 0:
+                # Convertir todos los valores a string de forma defensiva
+                producto_options = {}
+                for p in productos:
+                    try:
+                        desc = str(p.get('descripcion', ''))
+                        precio = p.get('precio_unitario', 0)
+                        precio_fmt = format_currency(precio)
+                        label = f"{desc} - {precio_fmt}"
+                        producto_options[label] = p
+                    except (TypeError, AttributeError, KeyError) as e:
+                        # Skip productos con datos malformados
+                        continue
+
+                if producto_options:
+                    producto_sel = st.selectbox(
+                        "Producto",
+                        options=list(producto_options.keys()),
+                        key="producto_select_nuevo"
+                    )
+                else:
+                    st.warning("No hay productos válidos registrados")
+                    producto_sel = None
             else:
                 st.warning("No hay productos registrados")
                 producto_sel = None
@@ -611,13 +701,56 @@ class FacturasPage:
     def _enviar_sri(self, factura_id):
         """Enviar factura al SRI"""
         try:
-            resultado = self.api_client.post(f"/facturas/{factura_id}/enviar-sri", {})
+            with st.spinner("Enviando factura al SRI..."):
+                resultado = self.api_client.post(f"/facturas/{factura_id}/enviar-sri", {})
+
             if resultado:
-                show_success_message("Factura enviada al SRI exitosamente")
+                # Mostrar mensaje detallado de éxito
+                estado = resultado.get('estado', 'AUTORIZADO')
+                numero_autorizacion = resultado.get('numero_autorizacion', 'N/A')
+                mensaje = resultado.get('message', 'Factura autorizada')
+
+                # Si es simulación, indicarlo
+                if resultado.get('nota'):
+                    st.warning(f"⚠️ {resultado.get('nota')}")
+
+                show_success_message(f"{mensaje}\n\nEstado: {estado}\nAutorización: {numero_autorizacion[:20]}...")
                 return True
             return False
         except Exception as e:
-            show_error_message(f"Error enviando factura al SRI: {str(e)}")
+            error_msg = str(e)
+
+            # Mejorar visualización del mensaje de error
+            if "No se puede enviar al SRI" in error_msg:
+                # Extraer solo el mensaje relevante
+                if "detail" in error_msg:
+                    try:
+                        import json
+                        # Intentar extraer el detail del JSON de error
+                        if "'" in error_msg:
+                            parts = error_msg.split("'detail': '")
+                            if len(parts) > 1:
+                                error_msg = parts[1].split("'")[0]
+                    except:
+                        pass
+
+                st.error(f"❌ {error_msg}")
+
+                # Mostrar guía visual de pasos
+                with st.expander("📋 Pasos para enviar al SRI"):
+                    st.markdown("""
+                    **Flujo correcto de emisión:**
+
+                    1. ✅ **Crear factura** - Generar número de comprobante
+                    2. ✅ **Generar XML** - Crear archivo XML del comprobante
+                    3. ✅ **Firmar factura** - Aplicar firma digital (botón ✍️)
+                    4. 🚀 **Enviar al SRI** - Transmitir al SRI para autorización
+
+                    *Asegúrese de completar los pasos en orden.*
+                    """)
+            else:
+                show_error_message(f"Error enviando factura al SRI: {error_msg}")
+
             return False
 
     def _consultar_autorizacion(self, factura_id):
@@ -630,6 +763,77 @@ class FacturasPage:
             return False
         except Exception as e:
             show_error_message(f"Error consultando autorización: {str(e)}")
+            return False
+
+    def _imprimir_factura(self, factura_id):
+        """Imprimir/Descargar RIDE de la factura"""
+        try:
+            # Primero generar el RIDE (PDF)
+            ride_resultado = self.api_client.post(f"/facturas/{factura_id}/generar-ride", {})
+
+            if ride_resultado:
+                # Intentar descargar el PDF
+                pdf_url = f"/facturas/{factura_id}/pdf"
+                pdf_response = self.api_client.get(pdf_url)
+
+                if pdf_response and 'pdf_content' in pdf_response:
+                    # Crear botón de descarga
+                    import base64
+                    pdf_bytes = pdf_response['pdf_content']
+
+                    # Si pdf_content es string en base64, decodificarlo
+                    if isinstance(pdf_bytes, str):
+                        pdf_bytes = base64.b64decode(pdf_bytes)
+
+                    show_success_message("RIDE generado exitosamente")
+
+                    # Mostrar botón de descarga
+                    st.download_button(
+                        label="📄 Descargar PDF",
+                        data=pdf_bytes,
+                        file_name=f"factura_{factura_id}.pdf",
+                        mime="application/pdf",
+                        key=f"download_pdf_{factura_id}"
+                    )
+                    return True
+                else:
+                    show_error_message("No se pudo obtener el PDF de la factura")
+                    return False
+            else:
+                show_error_message("No se pudo generar el RIDE")
+                return False
+
+        except Exception as e:
+            show_error_message(f"Error al imprimir factura: {str(e)}")
+            return False
+
+    def _anular_factura(self, factura_id):
+        """Anular una factura"""
+        try:
+            # Confirmar la anulación con el usuario
+            st.warning(f"⚠️ ¿Está seguro de que desea anular la factura ID {factura_id}?")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Sí, anular", key=f"confirm_cancel_{factura_id}"):
+                    # Aquí debería ir la lógica para anular la factura en el backend
+                    # Por ahora, mostraremos un mensaje de que la funcionalidad está en desarrollo
+                    resultado = self.api_client.post(f"/facturas/{factura_id}/anular", {})
+
+                    if resultado:
+                        show_success_message(f"Factura {factura_id} anulada exitosamente")
+                        return True
+                    else:
+                        show_error_message("No se pudo anular la factura")
+                        return False
+
+            with col2:
+                if st.button("❌ Cancelar", key=f"abort_cancel_{factura_id}"):
+                    st.info("Operación cancelada")
+                    return False
+
+        except Exception as e:
+            show_error_message(f"Error al anular factura: {str(e)}")
             return False
 
     def _render_consultas_sri(self):
@@ -680,77 +884,7 @@ class FacturasPage:
                         show_success_message(f"Se enviaron {éxitos} consultas al SRI")
                     if errores:
                         show_error_message(f"Errores en algunas consultas: {'; '.join(errores)}")
-            if not DataValidator.validate_identification(tipo_id, identificacion):
-                if tipo_id == "05":
-                    show_error_message("Cédula inválida")
-                elif tipo_id == "04":
-                    show_error_message("RUC inválido")
-                else:
-                    show_error_message("Identificación inválida")
-                return False
 
-            # Validar email si se proporciona
-            if email and not DataValidator.validate_email(email):
-                show_error_message("Email inválido")
-                return False
-
-        # Validar detalles de productos
-        for detalle in st.session_state.factura_detalles:
-            if detalle.get("cantidad", 0) <= 0:
-                show_error_message("La cantidad de todos los productos debe ser mayor a 0")
-                return False
-
-            if detalle.get("precio_unitario", 0) <= 0:
-                show_error_message("El precio unitario de todos los productos debe ser mayor a 0")
-                return False
-
-            # Validar descuento en dólares (no puede ser negativo ni mayor que el subtotal)
-            descuento_dolares = detalle.get("descuento", 0)
-            subtotal_item = detalle.get("cantidad", 0) * detalle.get("precio_unitario", 0)
-            if descuento_dolares < 0 or descuento_dolares > subtotal_item:
-                show_error_message("El descuento no puede ser negativo ni mayor al subtotal del item")
-                return False
-        return True
-    
-    def _crear_factura(self, cliente_id, cliente_option, observaciones, fecha_hora_emision=None):
-        """Crear nueva factura"""
-        try:
-            # Usar fecha y hora proporcionada o la actual
-            if fecha_hora_emision is None:
-                fecha_hora_emision = datetime.now()
-
-            factura_data = {
-                "cliente_id": cliente_id,
-                "fecha_emision": fecha_hora_emision.isoformat(),
-                "detalles": st.session_state.factura_detalles,
-                "observaciones": observaciones
-            }
-
-            # Si es cliente nuevo, agregarlo a los datos
-            if cliente_option == "Crear nuevo":
-                cliente_nuevo_data = {
-                    "tipo_identificacion": st.session_state.get("tipo_id_nuevo_cliente", "05"),
-                    "identificacion": st.session_state.get("identificacion_nuevo_cliente", ""),
-                    "razon_social": st.session_state.get("razon_social_nuevo_cliente", ""),
-                }
-                # Agregar campos opcionales solo si tienen valor
-                email_nuevo = st.session_state.get("email_nuevo_cliente")
-                if email_nuevo:
-                    cliente_nuevo_data["email"] = email_nuevo
-
-                factura_data["cliente_nuevo"] = cliente_nuevo_data
-
-            resultado = self.api_client.post("/facturas/", factura_data)
-
-            if resultado:
-                show_success_message(f"Factura creada: {resultado['numero_comprobante']}")
-                st.session_state.factura_detalles = []
-                st.session_state.editing_item_index = None
-                st.rerun()
-
-        except Exception as e:
-            show_error_message(f"Error al crear factura: {str(e)}")
-    
     def _render_estadisticas(self):
         """Renderizar estadísticas de facturación"""
         st.subheader("📊 Estadísticas de Facturación")
@@ -909,7 +1043,7 @@ class ClientesPage:
             
             # Formatear datos
             df['tipo_id_desc'] = df.apply(
-                lambda row: f"{row['tipo_identificacion']} - {row['identificacion']}", 
+                lambda row: f"{str(row['tipo_identificacion'])} - {str(row['identificacion'])}",
                 axis=1
             )
             
